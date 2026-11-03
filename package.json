@@ -1,0 +1,29 @@
+{
+  "name": "backend-irrigation",
+  "version": "0.1.0",
+  "private": true,
+  "description": "AWS backend for the irrigation system, as AWS CDK stacks.",
+  "license": "UNLICENSED",
+  "scripts": {
+    "build": "tsc --noEmit",
+    "test": "jest",
+    "synth": "cdk synth",
+    "deploy:ci": "cdk deploy Irrigation-Auth --require-approval never"
+  },
+  "dependencies": {
+    "aws-cdk-lib": "^2.275.0",
+    "constructs": "^10.8.1",
+    "jose": "^6.2.15"
+  },
+  "devDependencies": {
+    "@types/aws-lambda": "^8.10.164",
+    "@types/jest": "^30.0.0",
+    "@types/node": "^26.6.6",
+    "aws-cdk": "^2.1147.0",
+    "esbuild": "^0.28.2",
+    "jest": "^30.5.2",
+    "ts-jest": "^29.4.15",
+    "ts-node": "^10.9.2",
+    "typescript": "~5.9"
+  }
+}
