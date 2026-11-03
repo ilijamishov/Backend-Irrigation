@@ -20,7 +20,7 @@ Never run `cdk deploy`, `cdk bootstrap` or `cdk destroy` unless the user explici
 ## Architecture
 
 - **`Irrigation-Auth`** (`lib/auth-stack.ts`): Cognito user pool without a Hosted UI. Native Google sign-in uses custom auth: pre sign-up, define, create and verify auth challenge triggers in `lambda/auth/`. `GoogleTokenVerifier` checks the Google ID token: Google's keys via `jose`, issuer, audience = the web client ID(s) in `GOOGLE_CLIENT_IDS`, at most 5 minutes old, verified email. Usernames are `google_<sub>` (`usernames.ts`). Handlers are built by factories (`createPreSignUpHandler(verifier)`), so tests inject a verifier with a test key pair (`test/support/google-tokens.ts`). The module-level `handler` creates its verifier on the first call. The user pool is `RETAIN` with deletion protection.
-- **`Irrigation-GithubDeploy`** (`lib/github-deploy-stack.ts`): GitHub OIDC provider and the deploy role. It trusts only `repo:<githubRepository>:ref:refs/heads/main` and may only assume the CDK bootstrap roles. It's deployed by hand, never by the workflow. Don't add `environment:` to the deploy job, because that changes the OIDC subject the role trusts.
+- **`Irrigation-GithubDeploy`** (`lib/github-deploy-stack.ts`): GitHub OIDC provider and the deploy role. It trusts only GitHub's immutable OIDC subject `repo:<owner>@<ownerId>/<name>@<repositoryId>:ref:refs/heads/main` (`githubSubject`, IDs in `cdk.json`), not the old name-only format, and may only assume the CDK bootstrap roles. It's deployed by hand, never by the workflow. Don't add `environment:` to the deploy job, because that changes the OIDC subject the role trusts.
 - **Settings** are CDK context in `cdk.json`. They aren't secrets, and secrets don't go there.
 
 ## Code style

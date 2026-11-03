@@ -30,6 +30,8 @@ Outputs: `UserPoolId`, `AppClientId`, `Region`. The app needs them in its `confi
 
 An IAM OIDC provider for GitHub and the role `irrigation-github-deploy`. The role trusts **only** pushes to `main` of `ilijamishov/Backend-Irrigation`, and may do nothing but hand over to the CDK bootstrap roles. No AWS keys are stored in GitHub.
 
+GitHub's OIDC subject for this repository uses the **immutable format** with numeric IDs, `repo:ilijamishov@17722294/Backend-Irrigation@1444921207:ref:refs/heads/main` (repositories created since mid-2026 get it by default). The role trusts only that subject, so a repository deleted and recreated under the same name can't deploy. The IDs are in `cdk.json`; both come from `https://api.github.com/repos/ilijamishov/Backend-Irrigation` (`owner.id` and `id`). A failed sign-in shows the subject GitHub actually sent in CloudTrail (`AssumeRoleWithWebIdentity`, `userIdentity.principalId`).
+
 ## Configuration
 
 `cdk.json` holds the settings. None of them are secrets:
@@ -38,6 +40,7 @@ An IAM OIDC provider for GitHub and the role `irrigation-github-deploy`. The rol
 |---|---|
 | `region` | `us-east-1` |
 | `githubRepository` | `ilijamishov/Backend-Irrigation` |
+| `githubOwnerId`, `githubRepositoryId` | GitHub's numeric IDs of the owner and the repository, for the OIDC subject |
 | `googleWebClientId` | The **web** OAuth client ID from Google Cloud (`….apps.googleusercontent.com`). Synthesis fails while it's the placeholder. Several IDs can be given, separated by commas. |
 
 ## Development

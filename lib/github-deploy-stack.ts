@@ -7,6 +7,15 @@ const GITHUB_OIDC_URL = 'https://token.actions.githubusercontent.com';
 export interface GithubDeployStackProps extends StackProps {
   /** `owner/name` of the repository allowed to deploy. */
   readonly repository: string;
+  /**
+   * GitHub's numeric IDs of the owner and the repository. GitHub's OIDC
+   * subject contains them (`repo:owner@<ownerId>/name@<repositoryId>:…`),
+   * so a repository deleted and recreated under the same name can't deploy.
+   * Both are in `https://api.github.com/repos/<owner>/<name>` (`owner.id`,
+   * `id`).
+   */
+  readonly ownerId: string;
+  readonly repositoryId: string;
   /** The only branch allowed to deploy. */
   readonly branch: string;
   /** The CDK bootstrap qualifier (the default is `hnb659fds`). */
@@ -28,6 +37,7 @@ export class GithubDeployStack extends Stack {
     super(scope, id, props);
 
     const qualifier = props.bootstrapQualifier ?? 'hnb659fds';
+    const subject = githubSubject(props);
 
     const provider = new iam.OidcProviderNative(this, 'GithubOidc', {
       url: GITHUB_OIDC_URL,
@@ -41,7 +51,7 @@ export class GithubDeployStack extends Stack {
       assumedBy: new iam.WebIdentityPrincipal(provider.oidcProviderArn, {
         StringEquals: {
           'token.actions.githubusercontent.com:aud': 'sts.amazonaws.com',
-          'token.actions.githubusercontent.com:sub': `repo:${props.repository}:ref:refs/heads/${props.branch}`,
+          'token.actions.githubusercontent.com:sub': subject,
         },
       }),
     });
@@ -63,4 +73,25 @@ export class GithubDeployStack extends Stack {
       description: 'Set as the GitHub repository variable AWS_DEPLOY_ROLE_ARN',
     });
   }
+}
+
+/**
+ * The OIDC subject of a push to [branch], in GitHub's immutable format:
+ * `repo:<owner>@<ownerId>/<name>@<repositoryId>:ref:refs/heads/<branch>`.
+ */
+export function githubSubject(props: {
+  repository: string;
+  ownerId: string;
+  repositoryId: string;
+  branch: string;
+}): string {
+  const [owner, name, ...rest] = props.repository.split('/');
+  if (!owner || !name || rest.length > 0) {
+    throw new Error(`Repository must be "owner/name", got "${props.repository}".`);
+  }
+  if (!/^\d+$/.test(props.ownerId) || !/^\d+$/.test(props.repositoryId)) {
+    throw new Error('GitHub owner and repository IDs must be numeric.');
+  }
+
+  return `repo:${owner}@${props.ownerId}/${name}@${props.repositoryId}:ref:refs/heads/${props.branch}`;
 }

@@ -32,5 +32,7 @@ new GithubDeployStack(app, 'Irrigation-GithubDeploy', {
   env,
   description: 'Lets GitHub Actions deploy this repository from main',
   repository: context('githubRepository'),
+  ownerId: context('githubOwnerId'),
+  repositoryId: context('githubRepositoryId'),
   branch: 'main',
 });

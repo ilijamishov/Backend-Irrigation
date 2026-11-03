@@ -2,7 +2,7 @@ import { App } from 'aws-cdk-lib';
 import { Match, Template } from 'aws-cdk-lib/assertions';
 
 import { AuthStack } from '../lib/auth-stack';
-import { GithubDeployStack } from '../lib/github-deploy-stack';
+import { GithubDeployStack, githubSubject } from '../lib/github-deploy-stack';
 
 const env = { account: '123456789012', region: 'us-east-1' };
 
@@ -76,6 +76,8 @@ describe('GithubDeployStack', () => {
     const stack = new GithubDeployStack(new App(), 'Deploy', {
       env,
       repository: 'ilijamishov/Backend-Irrigation',
+      ownerId: '17722294',
+      repositoryId: '1444921207',
       branch: 'main',
     });
     template = Template.fromStack(stack);
@@ -91,13 +93,21 @@ describe('GithubDeployStack', () => {
               StringEquals: {
                 'token.actions.githubusercontent.com:aud': 'sts.amazonaws.com',
                 'token.actions.githubusercontent.com:sub':
-                  'repo:ilijamishov/Backend-Irrigation:ref:refs/heads/main',
+                  'repo:ilijamishov@17722294/Backend-Irrigation@1444921207:ref:refs/heads/main',
               },
             },
           }),
         ],
       },
     });
+  });
+
+  it('builds the immutable subject and refuses bad input', () => {
+    const base = { ownerId: '1', repositoryId: '2', branch: 'main' };
+
+    expect(githubSubject({ ...base, repository: 'o/r' })).toBe('repo:o@1/r@2:ref:refs/heads/main');
+    expect(() => githubSubject({ ...base, repository: 'no-slash' })).toThrow(/owner\/name/);
+    expect(() => githubSubject({ ...base, repository: 'o/r', ownerId: 'abc' })).toThrow(/numeric/);
   });
 
   it('may only hand over to the CDK bootstrap roles', () => {
