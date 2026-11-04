@@ -2,6 +2,7 @@ import type { APIGatewayProxyEventV2WithJWTAuthorizer } from 'aws-lambda';
 
 import type {
   AccessStore,
+  ControllerLocation,
   ControllerRecord,
   NewOwner,
   UserController,
@@ -21,6 +22,8 @@ const record: ControllerRecord = {
 };
 
 class FakeStore implements AccessStore {
+  locations: [string, string, ControllerLocation][] = [];
+  located: ControllerRecord | null = record;
   renames: [string, string, string][] = [];
   renamed: ControllerRecord | null = record;
   list: UserController[] = [];
@@ -41,6 +44,15 @@ class FakeStore implements AccessStore {
 
   async accessOf(): Promise<{ deviceId: string; role: 'owner' | 'manager' }[]> {
     return [];
+  }
+
+  async setLocation(
+    deviceId: string,
+    userId: string,
+    location: ControllerLocation,
+  ): Promise<ControllerRecord | null> {
+    this.locations.push([deviceId, userId, location]);
+    return this.located && { ...this.located, location };
   }
 
   async rename(deviceId: string, userId: string, name: string): Promise<ControllerRecord | null> {
@@ -70,11 +82,21 @@ function event(
 
 const CLAIM = 'POST /controllers/{deviceId}/claim';
 const NAME = 'PUT /controllers/{deviceId}/name';
+const LOCATION = 'PUT /controllers/{deviceId}/location';
 
 function setUp(outcome: ClaimOutcome = { result: 'pending' }) {
   const store = new FakeStore();
   const claim = jest.fn(async () => outcome);
-  return { store, claim, api: new ControllersApi(store, { claim }) };
+  const timeZoneAt = jest.fn(async (_latitude: number, _longitude: number) => ({
+    name: 'Europe/Skopje',
+    posix: 'CET-1CEST,M3.5.0,M10.5.0/3',
+  }));
+  return {
+    store,
+    claim,
+    timeZoneAt,
+    api: new ControllersApi(store, { claim }, { at: timeZoneAt }),
+  };
 }
 
 const parsed = (response: { body?: string }) => JSON.parse(response.body ?? 'null');
@@ -256,6 +278,91 @@ describe('ControllersApi', () => {
 
       expect(response.statusCode).toBe(400);
       expect(store.renames).toEqual([]);
+    });
+  });
+
+  describe('PUT location', () => {
+    const position = JSON.stringify({ latitude: 41.99646, longitude: 21.43141 });
+
+    it('saves the rounded position and the time zone, and answers with them', async () => {
+      const { api, store } = setUp();
+
+      const response = await api.handle(event(LOCATION, { body: position }));
+
+      const location = {
+        latitude: 42,
+        longitude: 21.43,
+        timeZone: 'Europe/Skopje',
+        posixTimeZone: 'CET-1CEST,M3.5.0,M10.5.0/3',
+      };
+      expect(store.locations).toEqual([[DEVICE_ID, 'alice', location]]);
+      expect(response.statusCode).toBe(200);
+      expect(parsed(response)).toEqual({
+        deviceId: DEVICE_ID,
+        name: 'Home Garden',
+        role: 'owner',
+        location,
+      });
+    });
+
+    it('finds the time zone from the exact position, not the rounded one', async () => {
+      const { api, timeZoneAt } = setUp();
+
+      await api.handle(event(LOCATION, { body: position }));
+
+      expect(timeZoneAt).toHaveBeenCalledWith(41.99646, 21.43141);
+    });
+
+    it('answers 403 for anyone who is not the Owner', async () => {
+      const { api, store } = setUp();
+      store.located = null;
+
+      const response = await api.handle(event(LOCATION, { body: position }));
+
+      expect(response.statusCode).toBe(403);
+      expect(parsed(response)).toEqual({ error: 'not_owner' });
+    });
+
+    it.each([
+      ['no body', undefined],
+      ['no longitude', '{"latitude":42}'],
+      ['text', '{"latitude":"42","longitude":21}'],
+      ['a latitude past the pole', '{"latitude":90.01,"longitude":21}'],
+      ['a longitude past the date line', '{"latitude":42,"longitude":-180.01}'],
+    ])('refuses %s', async (_name, body) => {
+      const { api, store, timeZoneAt } = setUp();
+
+      const response = await api.handle(event(LOCATION, { body }));
+
+      expect(response.statusCode).toBe(400);
+      expect(store.locations).toEqual([]);
+      expect(timeZoneAt).not.toHaveBeenCalled();
+    });
+
+    it('accepts the ends of both ranges', async () => {
+      const { api } = setUp();
+
+      const response = await api.handle(
+        event(LOCATION, { body: '{"latitude":-90,"longitude":180}' }),
+      );
+
+      expect(response.statusCode).toBe(200);
+    });
+
+    it('never logs the position, also when it fails', async () => {
+      const log = jest.spyOn(console, 'log').mockImplementation();
+      const warn = jest.spyOn(console, 'warn').mockImplementation();
+      const failed = jest.spyOn(console, 'error').mockImplementation();
+      const { api, timeZoneAt } = setUp();
+
+      await api.handle(event(LOCATION, { body: position }));
+      timeZoneAt.mockRejectedValueOnce(new Error('at 41.99646, 21.43141'));
+      await api.handle(event(LOCATION, { body: position }));
+
+      const logged = JSON.stringify([log.mock.calls, warn.mock.calls, failed.mock.calls]);
+      expect(logged).not.toContain('41.9');
+      expect(logged).not.toContain('21.4');
+      jest.restoreAllMocks();
     });
   });
 

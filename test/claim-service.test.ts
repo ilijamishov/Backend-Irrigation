@@ -53,6 +53,10 @@ class FakeStore implements AccessStore {
     return [];
   }
 
+  async setLocation(): Promise<ControllerRecord | null> {
+    return null;
+  }
+
   async rename(): Promise<ControllerRecord | null> {
     return null;
   }

@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import * as fs from 'node:fs';
 import * as path from 'node:path';
 
 import { App } from 'aws-cdk-lib';
@@ -19,13 +19,15 @@ const provisioningRoleArn = 'arn:aws:iam::123456789012:role/service-role/Provisi
 const iot = 'arn:aws:iot:us-east-1:123456789012';
 const thing = '${iot:Connection.Thing.ThingName}';
 
+let lastAssembly: string;
+
 function synth(importPhase: boolean): Template {
   const app = new App();
   const auth = new AuthStack(app, 'Auth', {
     env,
     googleClientIds: ['web-client.apps.googleusercontent.com'],
   });
-  return Template.fromStack(
+  const template = Template.fromStack(
     new ControllersStack(app, 'Controllers', {
       env,
       provisioningRoleArn,
@@ -35,6 +37,8 @@ function synth(importPhase: boolean): Template {
       appClient: auth.appClient,
     }),
   );
+  if (!importPhase) lastAssembly = app.synth().directory;
+  return template;
 }
 
 function policyNamed(template: Template, name: string) {
@@ -212,6 +216,7 @@ describe('ControllersStack', () => {
       'GET /controllers',
       'POST /controllers/{deviceId}/claim',
       'PUT /controllers/{deviceId}/name',
+      'PUT /controllers/{deviceId}/location',
     ])('needs a token from the app for %s', (routeKey) => {
       template.hasResourceProperties('AWS::ApiGatewayV2::Route', {
         RouteKey: routeKey,
@@ -221,7 +226,25 @@ describe('ControllersStack', () => {
     });
 
     it('has no other routes', () => {
-      template.resourceCountIs('AWS::ApiGatewayV2::Route', 3);
+      template.resourceCountIs('AWS::ApiGatewayV2::Route', 4);
+    });
+
+    it('packs the time zone map where the Lambda looks for it', () => {
+      const [{ Properties: api }] = Object.values(
+        template.findResources('AWS::Lambda::Function', {
+          Properties: { Environment: { Variables: { GEO_TZ_DATA_PATH: Match.anyValue() } } },
+        }),
+      );
+      const folder = api.Environment.Variables.GEO_TZ_DATA_PATH.replace('/var/task/', '');
+
+      const packed = fs
+        .readdirSync(lastAssembly, { withFileTypes: true })
+        .filter((entry) => entry.isDirectory())
+        .map((entry) => path.join(lastAssembly, entry.name, folder, 'timezones.geojson.geo.dat'))
+        .filter((file) => fs.existsSync(file));
+
+      expect(packed).toHaveLength(1);
+      expect(fs.statSync(packed[0]).size).toBeGreaterThan(1_000_000);
     });
 
     it('accepts only tokens from the app client of the user pool', () => {
@@ -342,7 +365,7 @@ describe('ControllersStack', () => {
 
     it('maps every imported resource in the import file', () => {
       const mapping = JSON.parse(
-        readFileSync(path.join(__dirname, '..', 'controllers-import.json'), 'utf8'),
+        fs.readFileSync(path.join(__dirname, '..', 'controllers-import.json'), 'utf8'),
       );
       const resources = imported.toJSON().Resources as Record<string, { Type: string }>;
       const adopted = Object.entries(resources)

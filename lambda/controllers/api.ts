@@ -9,6 +9,7 @@ import type {
 import { type AccessStore, type ControllerRecord, DynamoAccessStore } from './access-store';
 import { IotClaimReportSource } from './claim-report';
 import { type ClaimOutcome, ClaimService } from './claim-service';
+import { MapTimeZoneLookup, type TimeZoneLookup } from './time-zones';
 
 type Response = APIGatewayProxyStructuredResultV2;
 
@@ -32,6 +33,7 @@ export class ControllersApi {
   constructor(
     private readonly store: AccessStore,
     private readonly claims: Pick<ClaimService, 'claim'>,
+    private readonly timeZones: TimeZoneLookup,
   ) {}
 
   async handle(event: APIGatewayProxyEventV2WithJWTAuthorizer): Promise<Response> {
@@ -48,6 +50,8 @@ export class ControllersApi {
           return await this.claim(userId, event);
         case 'PUT /controllers/{deviceId}/name':
           return await this.rename(userId, event);
+        case 'PUT /controllers/{deviceId}/location':
+          return await this.setLocation(userId, event);
         default:
           return error(404, 'not_found');
       }
@@ -93,6 +97,33 @@ export class ControllersApi {
     // The same answer for a missing controller: it shows nothing to a stranger.
     return controller ? json(200, ownedView(controller)) : error(403, 'not_owner');
   }
+
+  /** Never logs the position: it shows where the Owner lives. */
+  private async setLocation(
+    userId: string,
+    event: APIGatewayProxyEventV2WithJWTAuthorizer,
+  ): Promise<Response> {
+    const deviceId = deviceIdOf(event);
+    const body = bodyOf(event);
+    const latitude = numberWithin(body?.latitude, 90);
+    const longitude = numberWithin(body?.longitude, 180);
+    if (!deviceId || latitude === null || longitude === null) {
+      return error(400, 'invalid_request');
+    }
+
+    // From the exact position, because a border can be closer than the rounding.
+    const timeZone = await this.timeZones.at(latitude, longitude);
+
+    const controller = await this.store.setLocation(deviceId, userId, {
+      latitude: roundedPosition(latitude),
+      longitude: roundedPosition(longitude),
+      timeZone: timeZone.name,
+      posixTimeZone: timeZone.posix,
+    });
+
+    // The same answer for a missing controller: it shows nothing to a stranger.
+    return controller ? json(200, ownedView(controller)) : error(403, 'not_owner');
+  }
 }
 
 function deviceIdOf(event: APIGatewayProxyEventV2WithJWTAuthorizer): string | null {
@@ -126,9 +157,23 @@ function validName(value: unknown): string | null {
   return length >= 1 && length <= MAX_NAME_LENGTH && !UNPRINTABLE_NAME.test(name) ? name : null;
 }
 
+function numberWithin(value: unknown, limit: number): number | null {
+  return typeof value === 'number' && Math.abs(value) <= limit ? value : null;
+}
+
+/** To about 1 km: enough for a forecast, and it doesn't point at a house. */
+function roundedPosition(value: number): number {
+  return Math.round(value * 100) / 100;
+}
+
 /** What the Owner sees. The owner ID and the hash stay in the backend. */
 function ownedView(controller: ControllerRecord) {
-  return { deviceId: controller.deviceId, name: controller.name, role: 'owner' };
+  return {
+    deviceId: controller.deviceId,
+    name: controller.name,
+    role: 'owner',
+    ...(controller.location ? { location: controller.location } : {}),
+  };
 }
 
 function json(statusCode: number, body: unknown): Response {
@@ -161,7 +206,7 @@ function fromEnvironment(environment: NodeJS.ProcessEnv = process.env): Controll
     new IoTDataPlaneClient({ endpoint: `https://${IOT_DATA_ENDPOINT}` }),
   );
 
-  return new ControllersApi(store, new ClaimService(store, reports));
+  return new ControllersApi(store, new ClaimService(store, reports), new MapTimeZoneLookup());
 }
 
 export const handler = (event: APIGatewayProxyEventV2WithJWTAuthorizer): Promise<Response> => {

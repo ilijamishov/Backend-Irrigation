@@ -9,12 +9,27 @@ import {
 
 export type Role = 'owner' | 'manager';
 
+/**
+ * Where a controller is, for its Owner only: it shows where the Owner lives. The
+ * position is rounded before it is stored (see roundedPosition in api.ts).
+ */
+export interface ControllerLocation {
+  readonly latitude: number;
+  readonly longitude: number;
+  /** The IANA name, for example `Europe/Skopje`. */
+  readonly timeZone: string;
+  /** What the controller runs on, for example `CET-1CEST,M3.5.0,M10.5.0/3`. */
+  readonly posixTimeZone: string;
+}
+
 /** Who owns a controller, and the claim code that made them its Owner. */
 export interface ControllerRecord {
   readonly deviceId: string;
   readonly name: string;
   readonly ownerId: string;
   readonly lastClaimHash: string;
+  /** Unset until the Owner gives it. A new claim starts without one. */
+  readonly location?: ControllerLocation;
 }
 
 /** A controller as one user sees it. */
@@ -22,6 +37,8 @@ export interface UserController {
   readonly deviceId: string;
   readonly name: string;
   readonly role: Role;
+  /** Only for the Owner. */
+  readonly location?: ControllerLocation;
 }
 
 export interface NewOwner {
@@ -52,6 +69,12 @@ export interface AccessStore {
   accessOf(userId: string): Promise<{ deviceId: string; role: Role }[]>;
   /** Returns null unless the user is the Owner. */
   rename(deviceId: string, userId: string, name: string): Promise<ControllerRecord | null>;
+  /** Returns null unless the user is the Owner. */
+  setLocation(
+    deviceId: string,
+    userId: string,
+    location: ControllerLocation,
+  ): Promise<ControllerRecord | null>;
 }
 
 const META = 'META';
@@ -137,11 +160,16 @@ export class DynamoAccessStore implements AccessStore {
 
   async controllersOf(userId: string): Promise<UserController[]> {
     const access = await this.accessOf(userId);
-    const names = await this.namesOf(access.map(({ deviceId }) => deviceId));
+    const details = await this.detailsOf(access.map(({ deviceId }) => deviceId));
 
     return access
-      .filter(({ deviceId }) => names.has(deviceId))
-      .map(({ deviceId, role }) => ({ deviceId, role, name: names.get(deviceId) as string }))
+      .flatMap(({ deviceId, role }): UserController[] => {
+        const found = details.get(deviceId);
+        if (!found) return [];
+
+        const location = role === 'owner' ? found.location : undefined;
+        return [{ deviceId, role, name: found.name, ...(location ? { location } : {}) }];
+      })
       .sort((a, b) => a.name.localeCompare(b.name));
   }
 
@@ -168,16 +196,33 @@ export class DynamoAccessStore implements AccessStore {
     return access;
   }
 
-  async rename(deviceId: string, userId: string, name: string): Promise<ControllerRecord | null> {
+  rename(deviceId: string, userId: string, name: string): Promise<ControllerRecord | null> {
+    return this.setForOwner(deviceId, userId, 'name', name);
+  }
+
+  setLocation(
+    deviceId: string,
+    userId: string,
+    location: ControllerLocation,
+  ): Promise<ControllerRecord | null> {
+    return this.setForOwner(deviceId, userId, 'location', location);
+  }
+
+  private async setForOwner(
+    deviceId: string,
+    userId: string,
+    attribute: string,
+    value: unknown,
+  ): Promise<ControllerRecord | null> {
     try {
       const { Attributes: item } = await this.client.send(
         new UpdateCommand({
           TableName: this.tableName,
           Key: { PK: controllerKey(deviceId), SK: META },
-          UpdateExpression: 'SET #name = :name',
+          UpdateExpression: 'SET #attribute = :value',
           ConditionExpression: 'ownerId = :userId',
-          ExpressionAttributeNames: { '#name': 'name' },
-          ExpressionAttributeValues: { ':name': name, ':userId': userId },
+          ExpressionAttributeNames: { '#attribute': attribute },
+          ExpressionAttributeValues: { ':value': value, ':userId': userId },
           ReturnValues: 'ALL_NEW',
         }),
       );
@@ -212,8 +257,10 @@ export class DynamoAccessStore implements AccessStore {
     return keys;
   }
 
-  private async namesOf(deviceIds: string[]): Promise<Map<string, string>> {
-    const names = new Map<string, string>();
+  private async detailsOf(
+    deviceIds: string[],
+  ): Promise<Map<string, { name: string; location?: ControllerLocation }>> {
+    const details = new Map<string, { name: string; location?: ControllerLocation }>();
     let keys = deviceIds.map((deviceId) => ({ PK: controllerKey(deviceId), SK: META }));
 
     while (keys.length > 0) {
@@ -224,20 +271,23 @@ export class DynamoAccessStore implements AccessStore {
           RequestItems: {
             [this.tableName]: {
               Keys: batch,
-              ProjectionExpression: 'PK, #name',
-              ExpressionAttributeNames: { '#name': 'name' },
+              ProjectionExpression: 'PK, #name, #location',
+              ExpressionAttributeNames: { '#name': 'name', '#location': 'location' },
             },
           },
         }),
       );
       for (const item of responses?.[this.tableName] ?? []) {
-        names.set(deviceIdOf(item.PK as string), item.name as string);
+        details.set(deviceIdOf(item.PK as string), {
+          name: item.name as string,
+          location: item.location as ControllerLocation | undefined,
+        });
       }
       const unread = (unprocessed?.[this.tableName]?.Keys ?? []) as typeof keys;
       keys = [...unread, ...keys.slice(100)];
     }
 
-    return names;
+    return details;
   }
 }
 
@@ -259,6 +309,7 @@ function recordOf(deviceId: string, item: Record<string, unknown>): ControllerRe
     name: item.name as string,
     ownerId: item.ownerId as string,
     lastClaimHash: item.lastClaimHash as string,
+    ...(item.location ? { location: item.location as ControllerLocation } : {}),
   };
 }
 

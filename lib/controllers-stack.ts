@@ -18,6 +18,9 @@ export const CLAIM_POLICY_NAME = 'ESP32IrrigationClaimProvisioningPolicy';
 export const TEMPLATE_NAME = 'ESP32IrrigationFleetProvisioning';
 export const ACCESS_TABLE_NAME = 'irrigation-access';
 export const AUTHORIZER_NAME = 'irrigation-app';
+/** Where the time zone map is in the API's Lambda package. */
+const TIME_ZONE_MAP_FOLDER = 'time-zone-map';
+const TIME_ZONE_MAP_FILE = 'timezones.geojson.geo.dat';
 const USER_INDEX_NAME = 'byUser';
 
 /** The controller's own Thing name, which AWS IoT fills in on each request. */
@@ -148,6 +151,7 @@ export class ControllersStack extends Stack {
         TABLE_NAME: table.tableName,
         USER_INDEX_NAME,
         IOT_DATA_ENDPOINT: props.iotDataEndpoint,
+        GEO_TZ_DATA_PATH: `/var/task/${TIME_ZONE_MAP_FOLDER}`,
       },
       logGroup: new logs.LogGroup(this, 'ControllersApiLogs', {
         retention: logs.RetentionDays.ONE_MONTH,
@@ -161,6 +165,17 @@ export class ControllersStack extends Stack {
         format: OutputFormat.CJS,
         target: 'node24',
         externalModules: [],
+        commandHooks: {
+          beforeBundling: () => [],
+          beforeInstall: () => [],
+          // esbuild can't see this file: geo-tz opens it by path when it runs.
+          afterBundling: (inputDir, outputDir) => [
+            copyFileCommand(
+              path.join(inputDir, 'node_modules', 'geo-tz', 'data', TIME_ZONE_MAP_FILE),
+              path.join(outputDir, TIME_ZONE_MAP_FOLDER, TIME_ZONE_MAP_FILE),
+            ),
+          ],
+        },
       },
     });
 
@@ -194,6 +209,7 @@ export class ControllersStack extends Stack {
       [apigateway.HttpMethod.GET, '/controllers'],
       [apigateway.HttpMethod.POST, '/controllers/{deviceId}/claim'],
       [apigateway.HttpMethod.PUT, '/controllers/{deviceId}/name'],
+      [apigateway.HttpMethod.PUT, '/controllers/{deviceId}/location'],
     ] as const) {
       api.addRoutes({ path: routePath, methods: [method], integration });
     }
@@ -311,6 +327,16 @@ export class ControllersStack extends Stack {
   private iotArn(resource: string): string {
     return `arn:aws:iot:${this.region}:${this.account}:${resource}`;
   }
+}
+
+/** In Node, because the bundling runs on Windows and on Linux. */
+function copyFileCommand(source: string, target: string): string {
+  const script = [
+    `const fs=require('fs'),path=require('path');`,
+    `fs.mkdirSync(path.dirname(process.argv[2]),{recursive:true});`,
+    `fs.copyFileSync(process.argv[1],process.argv[2]);`,
+  ].join('');
+  return `node -e "${script}" "${source}" "${target}"`;
 }
 
 /** Creates the certificate and the Thing, named by the controller's device ID. */

@@ -17,6 +17,7 @@
     "@aws-sdk/lib-dynamodb": "^3.1161.0",
     "aws-cdk-lib": "^2.275.0",
     "constructs": "^10.8.1",
+    "geo-tz": "^8.1.11",
     "jose": "^6.2.15"
   },
   "devDependencies": {

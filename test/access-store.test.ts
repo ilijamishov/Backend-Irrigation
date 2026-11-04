@@ -286,6 +286,97 @@ describe('DynamoAccessStore', () => {
     });
   });
 
+  describe('location', () => {
+    const location = {
+      latitude: 42,
+      longitude: 21.43,
+      timeZone: 'Europe/Skopje',
+      posixTimeZone: 'CET-1CEST,M3.5.0,M10.5.0/3',
+    };
+
+    it('is saved only if the user is the Owner', async () => {
+      const client = fakeClient(
+        new Map([
+          [UpdateCommand, [{ Attributes: { name: 'Home', ownerId: 'alice', location } }]],
+        ]),
+      );
+
+      await expect(store(client).setLocation(DEVICE_ID, 'alice', location)).resolves.toMatchObject(
+        { location },
+      );
+      expect(client.sent[0].input).toMatchObject({
+        ConditionExpression: 'ownerId = :userId',
+        ExpressionAttributeValues: { ':value': location, ':userId': 'alice' },
+      });
+    });
+
+    it('answers null for anyone else', async () => {
+      const client = fakeClient(
+        new Map([[UpdateCommand, [named('ConditionalCheckFailedException')]]]),
+      );
+
+      await expect(store(client).setLocation(DEVICE_ID, 'bob', location)).resolves.toBeNull();
+    });
+
+    it('is listed for the Owner and never for a Manager', async () => {
+      const client = fakeClient(
+        new Map<unknown, unknown[]>([
+          [
+            QueryCommand,
+            [
+              {
+                Items: [
+                  { PK: 'CONTROLLER#AAAAAAAAAAAA', role: 'owner' },
+                  { PK: 'CONTROLLER#BBBBBBBBBBBB', role: 'manager' },
+                  { PK: 'CONTROLLER#CCCCCCCCCCCC', role: 'owner' },
+                ],
+              },
+            ],
+          ],
+          [
+            BatchGetCommand,
+            [
+              {
+                Responses: {
+                  [TABLE]: [
+                    { PK: 'CONTROLLER#AAAAAAAAAAAA', name: 'A', location },
+                    { PK: 'CONTROLLER#BBBBBBBBBBBB', name: 'B', location },
+                    { PK: 'CONTROLLER#CCCCCCCCCCCC', name: 'C' },
+                  ],
+                },
+              },
+            ],
+          ],
+        ]),
+      );
+
+      await expect(store(client).controllersOf('alice')).resolves.toEqual([
+        { deviceId: 'AAAAAAAAAAAA', name: 'A', role: 'owner', location },
+        { deviceId: 'BBBBBBBBBBBB', name: 'B', role: 'manager' },
+        { deviceId: 'CCCCCCCCCCCC', name: 'C', role: 'owner' },
+      ]);
+    });
+
+    it('is read back with the controller', async () => {
+      const client = fakeClient(
+        new Map([[GetCommand, [{ Item: { name: 'Home', ownerId: 'alice', location } }]]]),
+      );
+
+      await expect(store(client).find(DEVICE_ID)).resolves.toMatchObject({ location });
+    });
+
+    it('does not survive a new claim, which replaces the whole item', async () => {
+      const client = fakeClient();
+
+      await store(client).claim(newOwner({ ...previous, location }));
+
+      const [{ Put: put }] = transactionOf(client.sent) as unknown as {
+        Put: { Item: Record<string, unknown> };
+      }[];
+      expect(put.Item).not.toHaveProperty('location');
+    });
+  });
+
   describe('rename', () => {
     it('changes the name only if the user is the Owner', async () => {
       const client = fakeClient(
@@ -299,7 +390,8 @@ describe('DynamoAccessStore', () => {
       });
       expect(client.sent[0].input).toMatchObject({
         ConditionExpression: 'ownerId = :userId',
-        ExpressionAttributeValues: { ':name': 'Home', ':userId': 'alice' },
+        ExpressionAttributeNames: { '#attribute': 'name' },
+        ExpressionAttributeValues: { ':value': 'Home', ':userId': 'alice' },
       });
     });
 

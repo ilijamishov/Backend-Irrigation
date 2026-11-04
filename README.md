@@ -40,17 +40,25 @@ The design is in the app repo's [docs/claiming.md](https://github.com/ilijamisho
 
 **A fully erased controller can't register again** until its old Thing is gone, because its certificate was erased too. Find the certificate, detach it from the Thing and the device policy, deactivate and delete it, then delete the Thing. The same applies if a controller never received AWS's answer to its registration. A factory reset keeps the certificate, so it doesn't need this.
 
-**The API** lets the app claim a controller, list a user's controllers and name them. It needs a Cognito access token from the app client, and the user is always taken from that token.
+**The API** lets the app claim a controller, list a user's controllers, name them and save where they are. It needs a Cognito access token from the app client, and the user is always taken from that token.
 
 | Call | Purpose |
 |---|---|
 | `GET /controllers` | The user's controllers, with name and role |
 | `POST /controllers/{deviceId}/claim` | Claims a controller with its one-time code |
 | `PUT /controllers/{deviceId}/name` | Names a controller, for its Owner only |
+| `PUT /controllers/{deviceId}/location` | Saves where a controller is, rounded to about 1 km, and answers with its time zone, for its Owner only |
 
 The rules and answers are in [docs/claiming.md](https://github.com/ilijamishov/Mobile-Irrigation/blob/main/docs/claiming.md) §4 and §5. Access is stored in the DynamoDB table `irrigation-access`, which has deletion protection and point-in-time recovery, and is kept if the stack is deleted. The claim handler reads each controller's report as a retained AWS IoT message and stores no codes.
 
 Outputs: `ApiUrl`, which the app needs, and `ControllersApiName`.
+
+**Time zones** come from the `geo-tz` map, which is packed with the API's Lambda and adds about 30 MB, and a table of POSIX rules in `lambda/controllers/posix-time-zones.json`. When a country changes its rules, generate the table again:
+
+```powershell
+pip install --upgrade tzdata
+python scripts/generate-posix-time-zones.py
+```
 
 **The app authorizer** decides what each app connection may do in AWS IoT. The app connects over WebSockets on port 443, with the authorizer's name in the header `x-amz-customauthorizer-name` and its Cognito access token in `x-irrigation-token`. A Lambda checks the token and builds a policy from the user's roles: both roles receive everything of their controllers and may send `command` and `schedule`, only the Owner may send `config`, and nobody may retain a message. The connection ends when the token expires, and the policy is refreshed every 5 minutes, so a role change reaches an open connection within minutes.
 
