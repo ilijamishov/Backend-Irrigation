@@ -2,6 +2,7 @@
 import { App } from 'aws-cdk-lib';
 
 import { AuthStack } from '../lib/auth-stack';
+import { ControllersStack } from '../lib/controllers-stack';
 import { GithubDeployStack } from '../lib/github-deploy-stack';
 
 const app = new App();
@@ -26,6 +27,14 @@ new AuthStack(app, 'Irrigation-Auth', {
   env,
   description: 'Cognito user pool with native Google sign-in for the irrigation app',
   googleClientIds: context('googleWebClientId').split(',').map((id) => id.trim()),
+});
+
+new ControllersStack(app, 'Irrigation-Controllers', {
+  env,
+  description: 'What every irrigation controller shares in AWS IoT',
+  provisioningRoleArn: context('provisioningRoleArn'),
+  // Only for the one-time `cdk import`, see the README.
+  importPhase: app.node.tryGetContext('controllersImportPhase') === 'true',
 });
 
 new GithubDeployStack(app, 'Irrigation-GithubDeploy', {

@@ -9,6 +9,7 @@ Region: `us-east-1`, the same as the controllers' AWS IoT endpoint.
 | Stack | What it is | Deployed by |
 |---|---|---|
 | `Irrigation-Auth` | Cognito user pool the app signs in to, with native Google sign-in | GitHub Actions, on every push to `main` |
+| `Irrigation-Controllers` | What every controller shares in AWS IoT: its policies, the Fleet Provisioning template and the registration hook | You, from your computer |
 | `Irrigation-GithubDeploy` | Lets GitHub Actions deploy without stored AWS keys (OIDC) | You, once, from your computer |
 
 ### Irrigation-Auth: native Google sign-in
@@ -26,6 +27,19 @@ The user pool keeps its users if the stack is deleted (`RETAIN`, deletion protec
 
 Outputs: `UserPoolId`, `AppClientId`, `Region`. The app needs them in its `config/development.json`.
 
+### Irrigation-Controllers: AWS IoT for every controller
+
+Nothing here is per controller. A new controller registers through the template, gets its own certificate and Thing, and reaches only its own topics.
+
+- **`ESP32IrrigationDevicePolicy`:** a controller connects as itself and reaches only its own topics, following the [MQTT contract](https://github.com/ilijamishov/ESP32-Irrigation/blob/main/docs/mqtt-contract.md).
+- **`ESP32IrrigationClaimProvisioningPolicy`:** the certificate in every firmware image may only register, connecting as `prov-<deviceId>`.
+- **`ESP32IrrigationFleetProvisioning`:** creates the certificate and the Thing, named by the device ID.
+- **Registration hook:** a Lambda that runs before each registration. It refuses anything that isn't a device ID, and any device ID that already has a Thing. Otherwise someone who extracted the claim certificate from a firmware image could get a valid certificate for an existing controller. Any failure also refuses.
+
+The design is in the app repo's [docs/claiming.md](https://github.com/ilijamishov/Mobile-Irrigation/blob/main/docs/claiming.md).
+
+**A fully erased controller can't register again** until its old Thing is gone, because its certificate was erased too. Find the certificate, detach it from the Thing and the device policy, deactivate and delete it, then delete the Thing. The same applies if a controller never received AWS's answer to its registration. A factory reset keeps the certificate, so it doesn't need this.
+
 ### Irrigation-GithubDeploy: deploys from GitHub
 
 An IAM OIDC provider for GitHub and the role `irrigation-github-deploy`. The role trusts **only** pushes to `main` of `ilijamishov/Backend-Irrigation`, and may do nothing but hand over to the CDK bootstrap roles. No AWS keys are stored in GitHub.
@@ -41,6 +55,7 @@ GitHub's OIDC subject for this repository uses the **immutable format** with num
 | `region` | `us-east-1` |
 | `githubRepository` | `ilijamishov/Backend-Irrigation` |
 | `githubOwnerId`, `githubRepositoryId` | GitHub's numeric IDs of the owner and the repository, for the OIDC subject |
+| `provisioningRoleArn` | The existing role that lets AWS IoT register controllers |
 | `googleWebClientId` | The **web** OAuth client ID from Google Cloud (`….apps.googleusercontent.com`). Synthesis fails while it's the placeholder. Several IDs can be given, separated by commas. |
 
 ## Development
@@ -74,6 +89,19 @@ Done once, from your computer:
 
 If the account already has a GitHub OIDC provider, step 4 fails with "already exists". Then the stack has to import the existing provider instead.
 
+### Adopting the AWS IoT resources
+
+The policies and the template were created by hand and controllers depend on them, so `Irrigation-Controllers` imports them instead of creating new ones. Done once, in PowerShell:
+
+```powershell
+npx.cmd cdk import Irrigation-Controllers -c controllersImportPhase=true --resource-mapping controllers-import.json --profile irrigation
+npx.cmd cdk deploy Irrigation-Controllers --profile irrigation
+```
+
+The first command adopts the resources without changing them. `controllersImportPhase` makes the stack describe them exactly as they were, because CloudFormation compares a deploy with its last template and not with AWS: importing the final version would mean the second command never applies the differences. The second command adds the hook and restricts the claim policy.
+
+Controllers keep their certificates: a policy is updated in place, and it is kept if the stack is ever deleted.
+
 ## Deployment
 
 `.github/workflows/ci.yml`:
@@ -81,4 +109,4 @@ If the account already has a GitHub OIDC provider, step 4 fails with "already ex
 - **Every push and pull request:** install, type-check, test, synthesize.
 - **Push to `main`, after the tests pass:** deploy `Irrigation-Auth` (`npm run deploy:ci`). One deploy runs at a time.
 
-`Irrigation-GithubDeploy` is never deployed by the workflow; change it by hand (step 4).
+`Irrigation-GithubDeploy` is never deployed by the workflow; change it by hand (step 4). `Irrigation-Controllers` isn't deployed by the workflow yet either: a deploy before the import above would fail, because the resources already exist.

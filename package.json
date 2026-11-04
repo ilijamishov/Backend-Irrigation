@@ -11,6 +11,7 @@
     "deploy:ci": "cdk deploy Irrigation-Auth --require-approval never"
   },
   "dependencies": {
+    "@aws-sdk/client-iot": "^3.1161.0",
     "aws-cdk-lib": "^2.275.0",
     "constructs": "^10.8.1",
     "jose": "^6.2.15"

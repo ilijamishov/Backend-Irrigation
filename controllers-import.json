@@ -1,0 +1,5 @@
+{
+  "DevicePolicy": { "Id": "ESP32IrrigationDevicePolicy" },
+  "ClaimPolicy": { "Id": "ESP32IrrigationClaimProvisioningPolicy" },
+  "FleetProvisioningTemplate": { "TemplateName": "ESP32IrrigationFleetProvisioning" }
+}
