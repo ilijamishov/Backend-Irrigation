@@ -217,6 +217,10 @@ describe('ControllersStack', () => {
       'POST /controllers/{deviceId}/claim',
       'PUT /controllers/{deviceId}/name',
       'PUT /controllers/{deviceId}/location',
+      'GET /controllers/{deviceId}/zones',
+      'POST /controllers/{deviceId}/zones',
+      'PUT /controllers/{deviceId}/zones/{zoneId}',
+      'DELETE /controllers/{deviceId}/zones/{zoneId}',
     ])('needs a token from the app for %s', (routeKey) => {
       template.hasResourceProperties('AWS::ApiGatewayV2::Route', {
         RouteKey: routeKey,
@@ -226,7 +230,7 @@ describe('ControllersStack', () => {
     });
 
     it('has no other routes', () => {
-      template.resourceCountIs('AWS::ApiGatewayV2::Route', 4);
+      template.resourceCountIs('AWS::ApiGatewayV2::Route', 8);
     });
 
     it('packs the time zone map where the Lambda looks for it', () => {

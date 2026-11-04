@@ -53,6 +53,18 @@ class FakeStore implements AccessStore {
     return [];
   }
 
+  async roleOf(): Promise<null> {
+    return null;
+  }
+
+  async zonesOf(): Promise<never[]> {
+    return [];
+  }
+
+  async saveZone(): Promise<void> {}
+
+  async deleteZone(): Promise<void> {}
+
   async setLocation(): Promise<ControllerRecord | null> {
     return null;
   }

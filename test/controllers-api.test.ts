@@ -9,6 +9,7 @@ import type {
 } from '../lambda/controllers/access-store';
 import { ControllersApi } from '../lambda/controllers/api';
 import type { ClaimOutcome } from '../lambda/controllers/claim-service';
+import type { ZoneChange, ZoneList, ZoneRemoval } from '../lambda/controllers/zone-service';
 
 const DEVICE_ID = '1C8F57371AA4';
 // 32 bytes of 7, in base64url.
@@ -46,6 +47,18 @@ class FakeStore implements AccessStore {
     return [];
   }
 
+  async roleOf(): Promise<null> {
+    return null;
+  }
+
+  async zonesOf(): Promise<never[]> {
+    return [];
+  }
+
+  async saveZone(): Promise<void> {}
+
+  async deleteZone(): Promise<void> {}
+
   async setLocation(
     deviceId: string,
     userId: string,
@@ -66,6 +79,7 @@ function event(
   overrides: {
     sub?: unknown;
     deviceId?: string;
+    zoneId?: string;
     body?: string;
     isBase64Encoded?: boolean;
   } = {},
@@ -73,7 +87,10 @@ function event(
   const sub = 'sub' in overrides ? overrides.sub : 'alice';
   return {
     routeKey,
-    pathParameters: { deviceId: overrides.deviceId ?? DEVICE_ID },
+    pathParameters: {
+      deviceId: overrides.deviceId ?? DEVICE_ID,
+      ...(overrides.zoneId ? { zoneId: overrides.zoneId } : {}),
+    },
     body: overrides.body,
     isBase64Encoded: overrides.isBase64Encoded ?? false,
     requestContext: { authorizer: { jwt: { claims: { sub }, scopes: [] } } },
@@ -83,6 +100,26 @@ function event(
 const CLAIM = 'POST /controllers/{deviceId}/claim';
 const NAME = 'PUT /controllers/{deviceId}/name';
 const LOCATION = 'PUT /controllers/{deviceId}/location';
+const ZONES = 'GET /controllers/{deviceId}/zones';
+const ADD_ZONE = 'POST /controllers/{deviceId}/zones';
+const UPDATE_ZONE = 'PUT /controllers/{deviceId}/zones/{zoneId}';
+const REMOVE_ZONE = 'DELETE /controllers/{deviceId}/zones/{zoneId}';
+const ZONE_ID = '3f2b1c9e-0a4d-4e6f-8b7a-1c2d3e4f5a6b';
+const zone = {
+  zoneId: ZONE_ID,
+  name: 'Back lawn',
+  description: 'By the fence',
+  relay: 5,
+  enabled: true,
+  createdAt: '2026-11-04T10:00:00.000Z',
+};
+const zoneAnswer = {
+  zoneId: ZONE_ID,
+  name: 'Back lawn',
+  description: 'By the fence',
+  relay: 5,
+  enabled: true,
+};
 
 function setUp(outcome: ClaimOutcome = { result: 'pending' }) {
   const store = new FakeStore();
@@ -91,11 +128,18 @@ function setUp(outcome: ClaimOutcome = { result: 'pending' }) {
     name: 'Europe/Skopje',
     posix: 'CET-1CEST,M3.5.0,M10.5.0/3',
   }));
+  const zones = {
+    list: jest.fn(async (): Promise<ZoneList> => ({ result: 'ok', zones: [zone] })),
+    add: jest.fn(async (): Promise<ZoneChange> => ({ result: 'ok', zone })),
+    update: jest.fn(async (): Promise<ZoneChange> => ({ result: 'ok', zone })),
+    remove: jest.fn(async (): Promise<ZoneRemoval> => ({ result: 'ok' })),
+  };
   return {
     store,
     claim,
     timeZoneAt,
-    api: new ControllersApi(store, { claim }, { at: timeZoneAt }),
+    zones,
+    api: new ControllersApi(store, { claim }, { at: timeZoneAt }, zones),
   };
 }
 
@@ -363,6 +407,178 @@ describe('ControllersApi', () => {
       expect(logged).not.toContain('41.9');
       expect(logged).not.toContain('21.4');
       jest.restoreAllMocks();
+    });
+  });
+
+  describe('zones', () => {
+    const body = (fields: Record<string, unknown>) => ({ body: JSON.stringify(fields) });
+
+    it('lists them, without their creation time', async () => {
+      const { api, zones } = setUp();
+
+      const response = await api.handle(event(ZONES));
+
+      expect(zones.list).toHaveBeenCalledWith('alice', DEVICE_ID);
+      expect(response.statusCode).toBe(200);
+      expect(parsed(response)).toEqual({ zones: [zoneAnswer] });
+    });
+
+    it('lists nothing for a user without access', async () => {
+      const { api, zones } = setUp();
+      zones.list.mockResolvedValueOnce({ result: 'no_access' });
+
+      const response = await api.handle(event(ZONES));
+
+      expect(response.statusCode).toBe(403);
+      expect(parsed(response)).toEqual({ error: 'no_access' });
+    });
+
+    it('adds a zone with all its fields, trimmed', async () => {
+      const { api, zones } = setUp();
+
+      const response = await api.handle(
+        event(
+          ADD_ZONE,
+          body({ name: ' Roses ', description: ' South ', relay: 8, enabled: false }),
+        ),
+      );
+
+      expect(zones.add).toHaveBeenCalledWith('alice', DEVICE_ID, {
+        name: 'Roses',
+        description: 'South',
+        relay: 8,
+        enabled: false,
+      });
+      expect(response.statusCode).toBe(201);
+      expect(parsed(response)).toEqual(zoneAnswer);
+    });
+
+    it('adds an enabled zone without a name or description', async () => {
+      const { api, zones } = setUp();
+
+      await api.handle(event(ADD_ZONE, body({ relay: 1 })));
+
+      expect(zones.add).toHaveBeenCalledWith('alice', DEVICE_ID, {
+        name: null,
+        description: null,
+        relay: 1,
+        enabled: true,
+      });
+    });
+
+    it.each([
+      ['no body', undefined],
+      ['no relay', '{"name":"A"}'],
+      ['relay 0', '{"relay":0}'],
+      ['relay 9', '{"relay":9}'],
+      ['a fractional relay', '{"relay":1.5}'],
+      ['a relay as text', '{"relay":"1"}'],
+      ['an empty name', '{"relay":1,"name":"  "}'],
+      ['a name of 41 characters', `{"relay":1,"name":"${'a'.repeat(41)}"}`],
+      ['a description that is no text', '{"relay":1,"description":5}'],
+      ['a description of 201 characters', `{"relay":1,"description":"${'a'.repeat(201)}"}`],
+      ['a line break in the description', '{"relay":1,"description":"a\\nb"}'],
+      ['enabled as text', '{"relay":1,"enabled":"yes"}'],
+    ])('refuses to add %s', async (_name, requestBody) => {
+      const { api, zones } = setUp();
+
+      const response = await api.handle(event(ADD_ZONE, { body: requestBody }));
+
+      expect(response.statusCode).toBe(400);
+      expect(zones.add).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['relay_in_use', 409],
+      ['not_owner', 403],
+    ] as const)('answers %s when adding', async (result, status) => {
+      const { api, zones } = setUp();
+      zones.add.mockResolvedValueOnce({ result });
+
+      const response = await api.handle(event(ADD_ZONE, body({ relay: 1 })));
+
+      expect(response.statusCode).toBe(status);
+      expect(parsed(response)).toEqual({ error: result });
+    });
+
+    it('updates a zone, an empty description removing the old one', async () => {
+      const { api, zones } = setUp();
+
+      const response = await api.handle(
+        event(UPDATE_ZONE, {
+          zoneId: ZONE_ID,
+          ...body({ name: 'Roses', description: ' ', relay: 3, enabled: false }),
+        }),
+      );
+
+      expect(zones.update).toHaveBeenCalledWith('alice', DEVICE_ID, ZONE_ID, {
+        name: 'Roses',
+        description: null,
+        relay: 3,
+        enabled: false,
+      });
+      expect(response.statusCode).toBe(200);
+    });
+
+    it.each([
+      ['no name', { relay: 1, enabled: true }],
+      ['no enabled', { relay: 1, name: 'A', enabled: undefined }],
+    ])('refuses an update with %s', async (_name, fields) => {
+      const { api, zones } = setUp();
+
+      const response = await api.handle(event(UPDATE_ZONE, { zoneId: ZONE_ID, ...body(fields) }));
+
+      expect(response.statusCode).toBe(400);
+      expect(zones.update).not.toHaveBeenCalled();
+    });
+
+    it('refuses a malformed zone ID', async () => {
+      const { api, zones } = setUp();
+
+      const update = await api.handle(
+        event(UPDATE_ZONE, {
+          zoneId: 'nope',
+          ...body({ name: 'A', relay: 1, enabled: true }),
+        }),
+      );
+      const removal = await api.handle(event(REMOVE_ZONE, { zoneId: 'nope' }));
+
+      expect(update.statusCode).toBe(400);
+      expect(removal.statusCode).toBe(400);
+      expect(zones.update).not.toHaveBeenCalled();
+      expect(zones.remove).not.toHaveBeenCalled();
+    });
+
+    it('answers 404 for a zone that is gone', async () => {
+      const { api, zones } = setUp();
+      zones.update.mockResolvedValueOnce({ result: 'zone_not_found' });
+
+      const response = await api.handle(
+        event(UPDATE_ZONE, {
+          zoneId: ZONE_ID,
+          ...body({ name: 'A', relay: 1, enabled: true }),
+        }),
+      );
+
+      expect(response.statusCode).toBe(404);
+    });
+
+    it('removes a zone', async () => {
+      const { api, zones } = setUp();
+
+      const response = await api.handle(event(REMOVE_ZONE, { zoneId: ZONE_ID }));
+
+      expect(zones.remove).toHaveBeenCalledWith('alice', DEVICE_ID, ZONE_ID);
+      expect(response.statusCode).toBe(200);
+    });
+
+    it('answers 403 when removing without being the Owner', async () => {
+      const { api, zones } = setUp();
+      zones.remove.mockResolvedValueOnce({ result: 'not_owner' });
+
+      const response = await api.handle(event(REMOVE_ZONE, { zoneId: ZONE_ID }));
+
+      expect(response.statusCode).toBe(403);
     });
   });
 

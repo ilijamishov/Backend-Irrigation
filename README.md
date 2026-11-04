@@ -40,7 +40,7 @@ The design is in the app repo's [docs/claiming.md](https://github.com/ilijamisho
 
 **A fully erased controller can't register again** until its old Thing is gone, because its certificate was erased too. Find the certificate, detach it from the Thing and the device policy, deactivate and delete it, then delete the Thing. The same applies if a controller never received AWS's answer to its registration. A factory reset keeps the certificate, so it doesn't need this.
 
-**The API** lets the app claim a controller, list a user's controllers, name them and save where they are. It needs a Cognito access token from the app client, and the user is always taken from that token.
+**The API** lets the app claim a controller, list a user's controllers, name them, save where they are and manage their zones. It needs a Cognito access token from the app client, and the user is always taken from that token.
 
 | Call | Purpose |
 |---|---|
@@ -48,8 +48,12 @@ The design is in the app repo's [docs/claiming.md](https://github.com/ilijamisho
 | `POST /controllers/{deviceId}/claim` | Claims a controller with its one-time code |
 | `PUT /controllers/{deviceId}/name` | Names a controller, for its Owner only |
 | `PUT /controllers/{deviceId}/location` | Saves where a controller is, rounded to about 1 km, and answers with its time zone, for its Owner only |
+| `GET /controllers/{deviceId}/zones` | Its zones, for everyone with access |
+| `POST /controllers/{deviceId}/zones` | Adds a zone on a relay, for its Owner only |
+| `PUT /controllers/{deviceId}/zones/{zoneId}` | Changes a zone, for its Owner only |
+| `DELETE /controllers/{deviceId}/zones/{zoneId}` | Deletes a zone, for its Owner only |
 
-The rules and answers are in [docs/claiming.md](https://github.com/ilijamishov/Mobile-Irrigation/blob/main/docs/claiming.md) §4 and §5. Access is stored in the DynamoDB table `irrigation-access`, which has deletion protection and point-in-time recovery, and is kept if the stack is deleted. The claim handler reads each controller's report as a retained AWS IoT message and stores no codes.
+The rules and answers are in [docs/claiming.md](https://github.com/ilijamishov/Mobile-Irrigation/blob/main/docs/claiming.md) §4 and §5, and for zones in [docs/zones.md](https://github.com/ilijamishov/Mobile-Irrigation/blob/main/docs/zones.md). A zone here is a named area connected to a relay; the firmware calls a relay a "zone". Access is stored in the DynamoDB table `irrigation-access`, which has deletion protection and point-in-time recovery, and is kept if the stack is deleted. The claim handler reads each controller's report as a retained AWS IoT message and stores no codes.
 
 Outputs: `ApiUrl`, which the app needs, and `ControllersApiName`.
 

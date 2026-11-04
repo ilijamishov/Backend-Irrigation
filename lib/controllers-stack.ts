@@ -210,6 +210,10 @@ export class ControllersStack extends Stack {
       [apigateway.HttpMethod.POST, '/controllers/{deviceId}/claim'],
       [apigateway.HttpMethod.PUT, '/controllers/{deviceId}/name'],
       [apigateway.HttpMethod.PUT, '/controllers/{deviceId}/location'],
+      [apigateway.HttpMethod.GET, '/controllers/{deviceId}/zones'],
+      [apigateway.HttpMethod.POST, '/controllers/{deviceId}/zones'],
+      [apigateway.HttpMethod.PUT, '/controllers/{deviceId}/zones/{zoneId}'],
+      [apigateway.HttpMethod.DELETE, '/controllers/{deviceId}/zones/{zoneId}'],
     ] as const) {
       api.addRoutes({ path: routePath, methods: [method], integration });
     }

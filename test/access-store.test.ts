@@ -11,6 +11,7 @@ import {
   type ControllerRecord,
   DynamoAccessStore,
   type NewOwner,
+  ZoneConflictError,
 } from '../lambda/controllers/access-store';
 
 const TABLE = 'irrigation-access';
@@ -283,6 +284,137 @@ describe('DynamoAccessStore', () => {
       );
 
       await expect(store(client).controllersOf('alice')).resolves.toHaveLength(2);
+    });
+  });
+
+  describe('zones', () => {
+    const zone = {
+      zoneId: 'lawn',
+      name: 'Back lawn',
+      relay: 5,
+      enabled: true,
+      createdAt: '2026-11-04T10:00:00.000Z',
+    };
+
+    it('reads the role of a user', async () => {
+      const client = fakeClient(new Map([[GetCommand, [{ Item: { role: 'manager' } }]]]));
+
+      await expect(store(client).roleOf(DEVICE_ID, 'bob')).resolves.toBe('manager');
+      expect(client.sent[0].input).toMatchObject({ Key: { PK, SK: 'USER#bob' } });
+    });
+
+    it('has no role for a user without access', async () => {
+      const client = fakeClient(new Map([[GetCommand, [{}]]]));
+
+      await expect(store(client).roleOf(DEVICE_ID, 'mallory')).resolves.toBeNull();
+    });
+
+    it('lists only the zones, in the order they were added, over all pages', async () => {
+      const older = { ...zone, zoneId: 'older', createdAt: '2026-11-03T10:00:00.000Z' };
+      const client = fakeClient(
+        new Map([
+          [
+            QueryCommand,
+            [
+              { Items: [{ ...zone, PK, SK: 'ZONE#lawn' }], LastEvaluatedKey: { PK } },
+              { Items: [{ ...older, PK, SK: 'ZONE#older' }] },
+            ],
+          ],
+        ]),
+      );
+
+      await expect(store(client).zonesOf(DEVICE_ID)).resolves.toEqual([older, zone]);
+      expect(client.sent[0].input).toMatchObject({
+        KeyConditionExpression: 'PK = :pk AND begins_with(SK, :zones)',
+        ExpressionAttributeValues: { ':pk': PK, ':zones': 'ZONE#' },
+      });
+    });
+
+    function versionCheckOf(client: { sent: { input: Record<string, never> }[] }) {
+      const [{ Update: update }] = transactionOf(client.sent) as unknown as {
+        Update: { ConditionExpression: string; ExpressionAttributeValues: object };
+      }[];
+      return update;
+    }
+
+    it('saves a zone only if the user is the Owner and nothing changed', async () => {
+      const client = fakeClient();
+
+      await store(client).saveZone(DEVICE_ID, 'alice', zone, 4);
+
+      expect(versionCheckOf(client)).toMatchObject({
+        ConditionExpression: 'ownerId = :userId AND zonesVersion = :current',
+        ExpressionAttributeValues: { ':next': 5, ':userId': 'alice', ':current': 4 },
+      });
+      expect(transactionOf(client.sent)[1]).toMatchObject({
+        Put: { Item: { PK, SK: 'ZONE#lawn', relay: 5, name: 'Back lawn' } },
+      });
+    });
+
+    it('expects no version on the first zone', async () => {
+      const client = fakeClient();
+
+      await store(client).saveZone(DEVICE_ID, 'alice', zone, 0);
+
+      expect(versionCheckOf(client)).toMatchObject({
+        ConditionExpression: 'ownerId = :userId AND attribute_not_exists(zonesVersion)',
+        ExpressionAttributeValues: { ':next': 1 },
+      });
+    });
+
+    it('deletes a zone under the same conditions', async () => {
+      const client = fakeClient();
+
+      await store(client).deleteZone(DEVICE_ID, 'alice', 'lawn', 2);
+
+      expect(versionCheckOf(client)).toMatchObject({
+        ExpressionAttributeValues: { ':next': 3, ':current': 2 },
+      });
+      expect(transactionOf(client.sent)[1]).toMatchObject({
+        Delete: { Key: { PK, SK: 'ZONE#lawn' } },
+      });
+    });
+
+    it('reports losing a race as a conflict', async () => {
+      const client = fakeClient(
+        new Map([[TransactWriteCommand, [named('TransactionCanceledException')]]]),
+      );
+
+      await expect(store(client).saveZone(DEVICE_ID, 'alice', zone, 1)).rejects.toBeInstanceOf(
+        ZoneConflictError,
+      );
+    });
+
+    it('passes on other failures', async () => {
+      const client = fakeClient(new Map([[TransactWriteCommand, [named('AccessDeniedException')]]]));
+
+      await expect(store(client).saveZone(DEVICE_ID, 'alice', zone, 1)).rejects.toThrow(
+        'AccessDeniedException',
+      );
+    });
+
+    it('do not survive a claim after a factory reset', async () => {
+      const client = fakeClient(
+        new Map([
+          [QueryCommand, [{ Items: [{ SK: 'META' }, { SK: 'USER#bob' }, { SK: 'ZONE#lawn' }] }]],
+        ]),
+      );
+
+      await store(client).claim(newOwner(previous));
+
+      expect(transactionOf(client.sent)).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ Delete: expect.objectContaining({ Key: { PK, SK: 'ZONE#lawn' } }) }),
+        ]),
+      );
+    });
+
+    it('reads the version with the controller', async () => {
+      const client = fakeClient(
+        new Map([[GetCommand, [{ Item: { name: 'Home', ownerId: 'alice', zonesVersion: 3 } }]]]),
+      );
+
+      await expect(store(client).find(DEVICE_ID)).resolves.toMatchObject({ zonesVersion: 3 });
     });
   });
 

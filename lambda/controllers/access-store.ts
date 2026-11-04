@@ -30,7 +30,25 @@ export interface ControllerRecord {
   readonly lastClaimHash: string;
   /** Unset until the Owner gives it. A new claim starts without one. */
   readonly location?: ControllerLocation;
+  /** Changes with every change of its zones. Unset before the first one. */
+  readonly zonesVersion?: number;
 }
+
+/**
+ * A named area of the yard, connected to one relay of the controller. Which
+ * relay is the Owner's choice: nothing says they are wired in order, or that
+ * all of them are used.
+ */
+export interface ControllerZone {
+  readonly zoneId: string;
+  readonly name: string;
+  readonly description?: string;
+  /** 1-8, the number the MQTT contract calls `zone`. */
+  readonly relay: number;
+  readonly enabled: boolean;
+  readonly createdAt: string;
+}
+
 
 /** A controller as one user sees it. */
 export interface UserController {
@@ -49,6 +67,14 @@ export interface NewOwner {
   readonly claimedAt: string;
   /** What the claim replaces. Everyone's access to it ends. */
   readonly previous: ControllerRecord | null;
+}
+
+/** The zones changed between reading them and saving this change. */
+export class ZoneConflictError extends Error {
+  constructor() {
+    super('The zones changed during the update.');
+    this.name = 'ZoneConflictError';
+  }
 }
 
 /** Someone else changed the controller between reading it and claiming it. */
@@ -75,9 +101,31 @@ export interface AccessStore {
     userId: string,
     location: ControllerLocation,
   ): Promise<ControllerRecord | null>;
+  /** The user's role on this controller, or null without access. */
+  roleOf(deviceId: string, userId: string): Promise<Role | null>;
+  /** In the order they were added. */
+  zonesOf(deviceId: string): Promise<ControllerZone[]>;
+  /**
+   * Adds or replaces a zone, if the user is the Owner and the zones are still at
+   * [zonesVersion]. Otherwise throws [ZoneConflictError].
+   */
+  saveZone(
+    deviceId: string,
+    userId: string,
+    zone: ControllerZone,
+    zonesVersion: number,
+  ): Promise<void>;
+  /** As for [saveZone]. */
+  deleteZone(
+    deviceId: string,
+    userId: string,
+    zoneId: string,
+    zonesVersion: number,
+  ): Promise<void>;
 }
 
 const META = 'META';
+const ZONE_PREFIX = 'ZONE#';
 
 /** One item per controller, and one per user with access to it. */
 export class DynamoAccessStore implements AccessStore {
@@ -208,6 +256,111 @@ export class DynamoAccessStore implements AccessStore {
     return this.setForOwner(deviceId, userId, 'location', location);
   }
 
+  async roleOf(deviceId: string, userId: string): Promise<Role | null> {
+    const { Item: item } = await this.client.send(
+      new GetCommand({
+        TableName: this.tableName,
+        Key: { PK: controllerKey(deviceId), SK: userKey(userId) },
+        ConsistentRead: true,
+      }),
+    );
+    return item ? (item.role as Role) : null;
+  }
+
+  async zonesOf(deviceId: string): Promise<ControllerZone[]> {
+    const zones: ControllerZone[] = [];
+    let start: Record<string, unknown> | undefined;
+
+    do {
+      const page = await this.client.send(
+        new QueryCommand({
+          TableName: this.tableName,
+          KeyConditionExpression: 'PK = :pk AND begins_with(SK, :zones)',
+          ExpressionAttributeValues: { ':pk': controllerKey(deviceId), ':zones': ZONE_PREFIX },
+          ConsistentRead: true,
+          ExclusiveStartKey: start,
+        }),
+      );
+      for (const item of page.Items ?? []) zones.push(zoneOf(item));
+      start = page.LastEvaluatedKey;
+    } while (start);
+
+    return zones.sort(
+      (a, b) => a.createdAt.localeCompare(b.createdAt) || a.zoneId.localeCompare(b.zoneId),
+    );
+  }
+
+  saveZone(
+    deviceId: string,
+    userId: string,
+    zone: ControllerZone,
+    zonesVersion: number,
+  ): Promise<void> {
+    return this.writeZone(deviceId, userId, zonesVersion, {
+      Put: {
+        TableName: this.tableName,
+        Item: { PK: controllerKey(deviceId), SK: zoneKey(zone.zoneId), ...zone },
+      },
+    });
+  }
+
+  deleteZone(
+    deviceId: string,
+    userId: string,
+    zoneId: string,
+    zonesVersion: number,
+  ): Promise<void> {
+    return this.writeZone(deviceId, userId, zonesVersion, {
+      Delete: {
+        TableName: this.tableName,
+        Key: { PK: controllerKey(deviceId), SK: zoneKey(zoneId) },
+      },
+    });
+  }
+
+  /**
+   * In one transaction with the version on the controller, so two changes can't
+   * both pass the check that a relay is free, and a change can't outlive a claim.
+   */
+  private async writeZone(
+    deviceId: string,
+    userId: string,
+    zonesVersion: number,
+    write: Record<string, unknown>,
+  ): Promise<void> {
+    try {
+      await this.client.send(
+        new TransactWriteCommand({
+          TransactItems: [
+            {
+              Update: {
+                TableName: this.tableName,
+                Key: { PK: controllerKey(deviceId), SK: META },
+                UpdateExpression: 'SET zonesVersion = :next',
+                ConditionExpression:
+                  'ownerId = :userId AND ' +
+                  (zonesVersion === 0
+                    ? 'attribute_not_exists(zonesVersion)'
+                    : 'zonesVersion = :current'),
+                ExpressionAttributeValues: {
+                  ':next': zonesVersion + 1,
+                  ':userId': userId,
+                  ...(zonesVersion === 0 ? {} : { ':current': zonesVersion }),
+                },
+              },
+            },
+            write,
+          ],
+        }),
+      );
+    } catch (error) {
+      if (error instanceof Error && error.name === 'TransactionCanceledException') {
+        throw new ZoneConflictError();
+      }
+      throw error;
+    }
+  }
+
   private async setForOwner(
     deviceId: string,
     userId: string,
@@ -310,7 +463,23 @@ function recordOf(deviceId: string, item: Record<string, unknown>): ControllerRe
     ownerId: item.ownerId as string,
     lastClaimHash: item.lastClaimHash as string,
     ...(item.location ? { location: item.location as ControllerLocation } : {}),
+    ...(item.zonesVersion === undefined ? {} : { zonesVersion: item.zonesVersion as number }),
   };
+}
+
+function zoneOf(item: Record<string, unknown>): ControllerZone {
+  return {
+    zoneId: item.zoneId as string,
+    name: item.name as string,
+    ...(item.description ? { description: item.description as string } : {}),
+    relay: item.relay as number,
+    enabled: item.enabled as boolean,
+    createdAt: item.createdAt as string,
+  };
+}
+
+function zoneKey(zoneId: string): string {
+  return `${ZONE_PREFIX}${zoneId}`;
 }
 
 function controllerKey(deviceId: string): string {
