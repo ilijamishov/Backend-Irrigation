@@ -137,6 +137,8 @@ This was done on 2026-11-04. Later changes to the stack only need the second com
 
 ## Deployment
 
+Step-by-step instructions are in [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
+
 `.github/workflows/ci.yml`:
 
 - **Every push and pull request:** install, type-check, test, synthesize.
