@@ -48,6 +48,8 @@ export interface AccessStore {
   /** Makes the user the sole Owner, or throws [ClaimConflictError]. */
   claim(owner: NewOwner): Promise<ControllerRecord>;
   controllersOf(userId: string): Promise<UserController[]>;
+  /** Only which controllers and roles, without reading their names. */
+  accessOf(userId: string): Promise<{ deviceId: string; role: Role }[]>;
   /** Returns null unless the user is the Owner. */
   rename(deviceId: string, userId: string, name: string): Promise<ControllerRecord | null>;
 }
@@ -134,6 +136,16 @@ export class DynamoAccessStore implements AccessStore {
   }
 
   async controllersOf(userId: string): Promise<UserController[]> {
+    const access = await this.accessOf(userId);
+    const names = await this.namesOf(access.map(({ deviceId }) => deviceId));
+
+    return access
+      .filter(({ deviceId }) => names.has(deviceId))
+      .map(({ deviceId, role }) => ({ deviceId, role, name: names.get(deviceId) as string }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+  }
+
+  async accessOf(userId: string): Promise<{ deviceId: string; role: Role }[]> {
     const access: { deviceId: string; role: Role }[] = [];
     let start: Record<string, unknown> | undefined;
 
@@ -153,12 +165,7 @@ export class DynamoAccessStore implements AccessStore {
       start = page.LastEvaluatedKey;
     } while (start);
 
-    const names = await this.namesOf(access.map(({ deviceId }) => deviceId));
-
-    return access
-      .filter(({ deviceId }) => names.has(deviceId))
-      .map(({ deviceId, role }) => ({ deviceId, role, name: names.get(deviceId) as string }))
-      .sort((a, b) => a.name.localeCompare(b.name));
+    return access;
   }
 
   async rename(deviceId: string, userId: string, name: string): Promise<ControllerRecord | null> {

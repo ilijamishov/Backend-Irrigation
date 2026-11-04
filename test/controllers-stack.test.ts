@@ -7,6 +7,7 @@ import { Match, Template } from 'aws-cdk-lib/assertions';
 import { AuthStack } from '../lib/auth-stack';
 import {
   ACCESS_TABLE_NAME,
+  AUTHORIZER_NAME,
   CLAIM_POLICY_NAME,
   ControllersStack,
   DEVICE_POLICY_NAME,
@@ -265,6 +266,48 @@ describe('ControllersStack', () => {
     });
   });
 
+  describe('the app authorizer', () => {
+    it('is active, without token signing', () => {
+      template.hasResourceProperties('AWS::IoT::Authorizer', {
+        AuthorizerName: AUTHORIZER_NAME,
+        SigningDisabled: true,
+        Status: 'ACTIVE',
+      });
+    });
+
+    it('can be called only by this authorizer', () => {
+      template.hasResourceProperties('AWS::Lambda::Permission', {
+        Principal: 'iot.amazonaws.com',
+        SourceArn: `${iot}:authorizer/${AUTHORIZER_NAME}`,
+        SourceAccount: '123456789012',
+      });
+    });
+
+    it('answers within what AWS IoT waits, and knows the app client', () => {
+      template.hasResourceProperties('AWS::Lambda::Function', {
+        Timeout: 5,
+        MemorySize: 512,
+        Environment: {
+          Variables: Match.objectLike({
+            USER_POOL_ID: Match.anyValue(),
+            APP_CLIENT_ID: Match.anyValue(),
+            IOT_ARN_PREFIX: `${iot}:`,
+          }),
+        },
+      });
+    });
+
+    it('may only read the access table', () => {
+      const policies = template.findResources('AWS::IAM::Policy');
+      const authorizer = Object.entries(policies).find(([id]) => id.startsWith('IotAuthorizer'));
+
+      const actions = JSON.stringify(authorizer?.[1].Properties.PolicyDocument);
+      expect(actions).toContain('dynamodb:Query');
+      expect(actions).not.toMatch(/dynamodb:(Put|Update|Delete|BatchWrite)/);
+      expect(actions).not.toContain('iot:');
+    });
+  });
+
   describe('import phase', () => {
     let imported: Template;
 
@@ -277,6 +320,7 @@ describe('ControllersStack', () => {
       imported.resourceCountIs('AWS::Lambda::Permission', 0);
       imported.resourceCountIs('AWS::DynamoDB::GlobalTable', 0);
       imported.resourceCountIs('AWS::ApiGatewayV2::Api', 0);
+      imported.resourceCountIs('AWS::IoT::Authorizer', 0);
 
       const [resource] = Object.values(imported.findResources('AWS::IoT::ProvisioningTemplate'));
       expect(resource.Properties.PreProvisioningHook).toBeUndefined();

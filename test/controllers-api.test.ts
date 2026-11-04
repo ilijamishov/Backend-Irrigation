@@ -39,6 +39,10 @@ class FakeStore implements AccessStore {
     return this.list;
   }
 
+  async accessOf(): Promise<{ deviceId: string; role: 'owner' | 'manager' }[]> {
+    return [];
+  }
+
   async rename(deviceId: string, userId: string, name: string): Promise<ControllerRecord | null> {
     this.renames.push([deviceId, userId, name]);
     return this.renamed;

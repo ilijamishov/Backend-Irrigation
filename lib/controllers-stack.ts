@@ -17,6 +17,7 @@ export const DEVICE_POLICY_NAME = 'ESP32IrrigationDevicePolicy';
 export const CLAIM_POLICY_NAME = 'ESP32IrrigationClaimProvisioningPolicy';
 export const TEMPLATE_NAME = 'ESP32IrrigationFleetProvisioning';
 export const ACCESS_TABLE_NAME = 'irrigation-access';
+export const AUTHORIZER_NAME = 'irrigation-app';
 const USER_INDEX_NAME = 'byUser';
 
 /** The controller's own Thing name, which AWS IoT fills in on each request. */
@@ -199,6 +200,60 @@ export class ControllersStack extends Stack {
 
     new CfnOutput(this, 'ApiUrl', { value: stage.url });
     new CfnOutput(this, 'ControllersApiName', { value: handler.functionName });
+
+    this.addAuthorizer(props, table);
+  }
+
+  /** Decides what each app connection may do in AWS IoT, from the user's roles. */
+  private addAuthorizer(props: ControllersStackProps, table: dynamodb.TableV2): void {
+    const handler = new NodejsFunction(this, 'IotAuthorizer', {
+      entry: path.join(__dirname, '..', 'lambda', 'controllers', 'iot-authorizer.ts'),
+      handler: 'handler',
+      runtime: lambda.Runtime.NODEJS_24_X,
+      architecture: lambda.Architecture.ARM_64,
+      // AWS IoT waits 5 seconds, also on the first call after a quiet time.
+      memorySize: 512,
+      timeout: Duration.seconds(5),
+      environment: {
+        USER_POOL_ID: props.userPool.userPoolId,
+        APP_CLIENT_ID: props.appClient.userPoolClientId,
+        TABLE_NAME: table.tableName,
+        USER_INDEX_NAME,
+        IOT_ARN_PREFIX: this.iotArn(''),
+      },
+      logGroup: new logs.LogGroup(this, 'IotAuthorizerLogs', {
+        retention: logs.RetentionDays.ONE_MONTH,
+        removalPolicy: RemovalPolicy.DESTROY,
+      }),
+      // As for the API, and esbuild turns jose into CommonJS as well.
+      bundling: {
+        minify: true,
+        sourceMap: true,
+        format: OutputFormat.CJS,
+        target: 'node24',
+        externalModules: [],
+      },
+    });
+
+    table.grantReadData(handler);
+
+    handler.addPermission('InvokedByIot', {
+      principal: new iam.ServicePrincipal('iot.amazonaws.com'),
+      sourceAccount: this.account,
+      sourceArn: this.iotArn(`authorizer/${AUTHORIZER_NAME}`),
+    });
+
+    const authorizer = new iot.CfnAuthorizer(this, 'AppAuthorizer', {
+      authorizerName: AUTHORIZER_NAME,
+      authorizerFunctionArn: handler.functionArn,
+      // An app can't keep a signing key secret. See iot-authorizer.ts.
+      signingDisabled: true,
+      status: 'ACTIVE',
+    });
+    authorizer.node.addDependency(handler);
+
+    new CfnOutput(this, 'IotAuthorizerName', { value: AUTHORIZER_NAME });
+    new CfnOutput(this, 'IotAuthorizerFunction', { value: handler.functionName });
   }
 
   /** Each controller may connect as itself and reach only its own topics. */

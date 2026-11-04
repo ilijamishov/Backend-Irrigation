@@ -52,6 +52,12 @@ The rules and answers are in [docs/claiming.md](https://github.com/ilijamishov/M
 
 Outputs: `ApiUrl`, which the app needs, and `ControllersApiName`.
 
+**The app authorizer** decides what each app connection may do in AWS IoT. The app connects over WebSockets on port 443, with the authorizer's name in the header `x-amz-customauthorizer-name` and its Cognito access token in `x-irrigation-token`. A Lambda checks the token and builds a policy from the user's roles: both roles receive everything of their controllers and may send `command` and `schedule`, only the Owner may send `config`, and nobody may retain a message. The connection ends when the token expires, and the policy is refreshed every 5 minutes, so a role change reaches an open connection within minutes.
+
+Token signing is off, because an app can't keep a signing key secret, so anyone can make AWS IoT call this Lambda. A bad token is refused before anything else is read.
+
+Outputs: `IotAuthorizerName`, which the app needs, and `IotAuthorizerFunction`.
+
 ### Irrigation-GithubDeploy: deploys from GitHub
 
 An IAM OIDC provider for GitHub and the role `irrigation-github-deploy`. The role trusts **only** pushes to `main` of `ilijamishov/Backend-Irrigation`, and may do nothing but hand over to the CDK bootstrap roles. No AWS keys are stored in GitHub.

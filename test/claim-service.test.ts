@@ -49,6 +49,10 @@ class FakeStore implements AccessStore {
     return [];
   }
 
+  async accessOf(): Promise<{ deviceId: string; role: 'owner' | 'manager' }[]> {
+    return [];
+  }
+
   async rename(): Promise<ControllerRecord | null> {
     return null;
   }
