@@ -23,7 +23,7 @@ const env = {
   region: context('region'),
 };
 
-new AuthStack(app, 'Irrigation-Auth', {
+const auth = new AuthStack(app, 'Irrigation-Auth', {
   env,
   description: 'Cognito user pool with native Google sign-in for the irrigation app',
   googleClientIds: context('googleWebClientId').split(',').map((id) => id.trim()),
@@ -33,6 +33,9 @@ new ControllersStack(app, 'Irrigation-Controllers', {
   env,
   description: 'What every irrigation controller shares in AWS IoT',
   provisioningRoleArn: context('provisioningRoleArn'),
+  iotDataEndpoint: context('iotDataEndpoint'),
+  userPool: auth.userPool,
+  appClient: auth.appClient,
   // Only for the one-time `cdk import`, see the README.
   importPhase: app.node.tryGetContext('controllersImportPhase') === 'true',
 });

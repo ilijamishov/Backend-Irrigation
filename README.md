@@ -9,7 +9,7 @@ Region: `us-east-1`, the same as the controllers' AWS IoT endpoint.
 | Stack | What it is | Deployed by |
 |---|---|---|
 | `Irrigation-Auth` | Cognito user pool the app signs in to, with native Google sign-in | GitHub Actions, on every push to `main` |
-| `Irrigation-Controllers` | What every controller shares in AWS IoT: its policies, the Fleet Provisioning template and the registration hook | You, from your computer |
+| `Irrigation-Controllers` | What every controller shares in AWS IoT (its policies, the Fleet Provisioning template and the registration hook), who may reach which controller, and the API for it | You, from your computer |
 | `Irrigation-GithubDeploy` | Lets GitHub Actions deploy without stored AWS keys (OIDC) | You, once, from your computer |
 
 ### Irrigation-Auth: native Google sign-in
@@ -40,6 +40,18 @@ The design is in the app repo's [docs/claiming.md](https://github.com/ilijamisho
 
 **A fully erased controller can't register again** until its old Thing is gone, because its certificate was erased too. Find the certificate, detach it from the Thing and the device policy, deactivate and delete it, then delete the Thing. The same applies if a controller never received AWS's answer to its registration. A factory reset keeps the certificate, so it doesn't need this.
 
+**The API** lets the app claim a controller, list a user's controllers and name them. It needs a Cognito access token from the app client, and the user is always taken from that token.
+
+| Call | Purpose |
+|---|---|
+| `GET /controllers` | The user's controllers, with name and role |
+| `POST /controllers/{deviceId}/claim` | Claims a controller with its one-time code |
+| `PUT /controllers/{deviceId}/name` | Names a controller, for its Owner only |
+
+The rules and answers are in [docs/claiming.md](https://github.com/ilijamishov/Mobile-Irrigation/blob/main/docs/claiming.md) §4 and §5. Access is stored in the DynamoDB table `irrigation-access`, which has deletion protection and point-in-time recovery, and is kept if the stack is deleted. The claim handler reads each controller's report as a retained AWS IoT message and stores no codes.
+
+Outputs: `ApiUrl`, which the app needs, and `ControllersApiName`.
+
 ### Irrigation-GithubDeploy: deploys from GitHub
 
 An IAM OIDC provider for GitHub and the role `irrigation-github-deploy`. The role trusts **only** pushes to `main` of `ilijamishov/Backend-Irrigation`, and may do nothing but hand over to the CDK bootstrap roles. No AWS keys are stored in GitHub.
@@ -56,6 +68,7 @@ GitHub's OIDC subject for this repository uses the **immutable format** with num
 | `githubRepository` | `ilijamishov/Backend-Irrigation` |
 | `githubOwnerId`, `githubRepositoryId` | GitHub's numeric IDs of the owner and the repository, for the OIDC subject |
 | `provisioningRoleArn` | The existing role that lets AWS IoT register controllers |
+| `iotDataEndpoint` | This account's AWS IoT data endpoint (`aws iot describe-endpoint --endpoint-type iot:Data-ATS`) |
 | `googleWebClientId` | The **web** OAuth client ID from Google Cloud (`….apps.googleusercontent.com`). Synthesis fails while it's the placeholder. Several IDs can be given, separated by commas. |
 
 ## Development
@@ -101,6 +114,8 @@ npx.cmd cdk deploy Irrigation-Controllers --profile irrigation
 The first command adopts the resources without changing them. `controllersImportPhase` makes the stack describe them exactly as they were, because CloudFormation compares a deploy with its last template and not with AWS: importing the final version would mean the second command never applies the differences. The second command adds the hook and restricts the claim policy.
 
 Controllers keep their certificates: a policy is updated in place, and it is kept if the stack is ever deleted.
+
+This was done on 2026-11-04. Later changes to the stack only need the second command. It also deploys `Irrigation-Auth` when needed, because the API uses its user pool.
 
 ## Deployment
 

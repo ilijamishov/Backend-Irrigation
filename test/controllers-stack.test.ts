@@ -4,7 +4,9 @@ import * as path from 'node:path';
 import { App } from 'aws-cdk-lib';
 import { Match, Template } from 'aws-cdk-lib/assertions';
 
+import { AuthStack } from '../lib/auth-stack';
 import {
+  ACCESS_TABLE_NAME,
   CLAIM_POLICY_NAME,
   ControllersStack,
   DEVICE_POLICY_NAME,
@@ -17,8 +19,20 @@ const iot = 'arn:aws:iot:us-east-1:123456789012';
 const thing = '${iot:Connection.Thing.ThingName}';
 
 function synth(importPhase: boolean): Template {
+  const app = new App();
+  const auth = new AuthStack(app, 'Auth', {
+    env,
+    googleClientIds: ['web-client.apps.googleusercontent.com'],
+  });
   return Template.fromStack(
-    new ControllersStack(new App(), 'Controllers', { env, provisioningRoleArn, importPhase }),
+    new ControllersStack(app, 'Controllers', {
+      env,
+      provisioningRoleArn,
+      importPhase,
+      iotDataEndpoint: 'example-ats.iot.us-east-1.amazonaws.com',
+      userPool: auth.userPool,
+      appClient: auth.appClient,
+    }),
   );
 }
 
@@ -162,6 +176,95 @@ describe('ControllersStack', () => {
     );
   });
 
+  describe('the access table', () => {
+    it('keeps ownership when the stack is deleted, and guards against mistakes', () => {
+      template.hasResource('AWS::DynamoDB::GlobalTable', {
+        DeletionPolicy: 'Retain',
+        UpdateReplacePolicy: 'Retain',
+      });
+      template.hasResourceProperties('AWS::DynamoDB::GlobalTable', {
+        TableName: ACCESS_TABLE_NAME,
+        BillingMode: 'PAY_PER_REQUEST',
+        Replicas: [
+          Match.objectLike({
+            DeletionProtectionEnabled: true,
+            PointInTimeRecoverySpecification: { PointInTimeRecoveryEnabled: true },
+          }),
+        ],
+      });
+    });
+
+    it('can list the controllers of a user', () => {
+      template.hasResourceProperties('AWS::DynamoDB::GlobalTable', {
+        GlobalSecondaryIndexes: [
+          Match.objectLike({
+            IndexName: 'byUser',
+            KeySchema: [{ AttributeName: 'userId', KeyType: 'HASH' }],
+          }),
+        ],
+      });
+    });
+  });
+
+  describe('the API', () => {
+    it.each([
+      'GET /controllers',
+      'POST /controllers/{deviceId}/claim',
+      'PUT /controllers/{deviceId}/name',
+    ])('needs a token from the app for %s', (routeKey) => {
+      template.hasResourceProperties('AWS::ApiGatewayV2::Route', {
+        RouteKey: routeKey,
+        AuthorizationType: 'JWT',
+        AuthorizerId: Match.anyValue(),
+      });
+    });
+
+    it('has no other routes', () => {
+      template.resourceCountIs('AWS::ApiGatewayV2::Route', 3);
+    });
+
+    it('accepts only tokens from the app client of the user pool', () => {
+      template.hasResourceProperties('AWS::ApiGatewayV2::Authorizer', {
+        AuthorizerType: 'JWT',
+        JwtConfiguration: { Audience: [Match.anyValue()], Issuer: Match.anyValue() },
+      });
+    });
+
+    it('is throttled', () => {
+      template.hasResourceProperties('AWS::ApiGatewayV2::Stage', {
+        StageName: '$default',
+        AutoDeploy: true,
+        DefaultRouteSettings: { ThrottlingRateLimit: 20, ThrottlingBurstLimit: 40 },
+      });
+    });
+
+    it('may touch only the claim topics in AWS IoT', () => {
+      template.hasResourceProperties('AWS::IAM::Policy', {
+        PolicyDocument: {
+          Statement: Match.arrayWith([
+            {
+              Action: ['iot:GetRetainedMessage', 'iot:Publish', 'iot:RetainPublish'],
+              Effect: 'Allow',
+              Resource: `${iot}:topic/esp32-irrigation/*/claim`,
+            },
+          ]),
+        },
+      });
+    });
+
+    it('is told where the data lives', () => {
+      template.hasResourceProperties('AWS::Lambda::Function', {
+        Environment: {
+          Variables: Match.objectLike({
+            TABLE_NAME: Match.anyValue(),
+            USER_INDEX_NAME: 'byUser',
+            IOT_DATA_ENDPOINT: 'example-ats.iot.us-east-1.amazonaws.com',
+          }),
+        },
+      });
+    });
+  });
+
   describe('import phase', () => {
     let imported: Template;
 
@@ -172,6 +275,8 @@ describe('ControllersStack', () => {
     it('has only what can be imported, with nothing left dangling', () => {
       imported.resourceCountIs('AWS::Lambda::Function', 0);
       imported.resourceCountIs('AWS::Lambda::Permission', 0);
+      imported.resourceCountIs('AWS::DynamoDB::GlobalTable', 0);
+      imported.resourceCountIs('AWS::ApiGatewayV2::Api', 0);
 
       const [resource] = Object.values(imported.findResources('AWS::IoT::ProvisioningTemplate'));
       expect(resource.Properties.PreProvisioningHook).toBeUndefined();

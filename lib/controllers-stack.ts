@@ -1,6 +1,11 @@
 import * as path from 'node:path';
 
 import { CfnOutput, CfnResource, Duration, RemovalPolicy, Stack, type StackProps } from 'aws-cdk-lib';
+import * as apigateway from 'aws-cdk-lib/aws-apigatewayv2';
+import { HttpUserPoolAuthorizer } from 'aws-cdk-lib/aws-apigatewayv2-authorizers';
+import { HttpLambdaIntegration } from 'aws-cdk-lib/aws-apigatewayv2-integrations';
+import type * as cognito from 'aws-cdk-lib/aws-cognito';
+import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as iot from 'aws-cdk-lib/aws-iot';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
@@ -11,6 +16,8 @@ import type { Construct } from 'constructs';
 export const DEVICE_POLICY_NAME = 'ESP32IrrigationDevicePolicy';
 export const CLAIM_POLICY_NAME = 'ESP32IrrigationClaimProvisioningPolicy';
 export const TEMPLATE_NAME = 'ESP32IrrigationFleetProvisioning';
+export const ACCESS_TABLE_NAME = 'irrigation-access';
+const USER_INDEX_NAME = 'byUser';
 
 /** The controller's own Thing name, which AWS IoT fills in on each request. */
 const THING = '${iot:Connection.Thing.ThingName}';
@@ -18,6 +25,11 @@ const THING = '${iot:Connection.Thing.ThingName}';
 export interface ControllersStackProps extends StackProps {
   /** The existing role that lets AWS IoT register controllers. */
   readonly provisioningRoleArn: string;
+  /** Whose tokens the API accepts. */
+  readonly userPool: cognito.IUserPool;
+  readonly appClient: cognito.IUserPoolClient;
+  /** The AWS IoT data endpoint of this account, for retained messages. */
+  readonly iotDataEndpoint: string;
   /**
    * Describes the AWS IoT resources exactly as they were before this stack
    * adopted them, for `cdk import`. CloudFormation compares a deploy with its
@@ -101,6 +113,92 @@ export class ControllersStack extends Stack {
     template.node.addDependency(hook);
 
     new CfnOutput(this, 'RegistrationHookName', { value: hook.functionName });
+
+    this.addApi(props);
+  }
+
+  /** Who owns and manages which controller, and the API the app reads it with. */
+  private addApi(props: ControllersStackProps): void {
+    const table = new dynamodb.TableV2(this, 'AccessTable', {
+      tableName: ACCESS_TABLE_NAME,
+      partitionKey: { name: 'PK', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'SK', type: dynamodb.AttributeType.STRING },
+      billing: dynamodb.Billing.onDemand(),
+      globalSecondaryIndexes: [
+        {
+          indexName: USER_INDEX_NAME,
+          partitionKey: { name: 'userId', type: dynamodb.AttributeType.STRING },
+        },
+      ],
+      // Ownership must survive mistakes and outlive the stack.
+      deletionProtection: true,
+      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+      removalPolicy: RemovalPolicy.RETAIN,
+    });
+
+    const handler = new NodejsFunction(this, 'ControllersApi', {
+      entry: path.join(__dirname, '..', 'lambda', 'controllers', 'api.ts'),
+      handler: 'handler',
+      runtime: lambda.Runtime.NODEJS_24_X,
+      architecture: lambda.Architecture.ARM_64,
+      memorySize: 256,
+      timeout: Duration.seconds(10),
+      environment: {
+        TABLE_NAME: table.tableName,
+        USER_INDEX_NAME,
+        IOT_DATA_ENDPOINT: props.iotDataEndpoint,
+      },
+      logGroup: new logs.LogGroup(this, 'ControllersApiLogs', {
+        retention: logs.RetentionDays.ONE_MONTH,
+        removalPolicy: RemovalPolicy.DESTROY,
+      }),
+      // The SDK is bundled, because the Lambda runtime doesn't promise every
+      // package this uses. CommonJS, because its dependencies use require().
+      bundling: {
+        minify: true,
+        sourceMap: true,
+        format: OutputFormat.CJS,
+        target: 'node24',
+        externalModules: [],
+      },
+    });
+
+    table.grantReadWriteData(handler);
+
+    handler.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ['iot:GetRetainedMessage', 'iot:Publish', 'iot:RetainPublish'],
+        resources: [this.iotArn('topic/esp32-irrigation/*/claim')],
+      }),
+    );
+
+    const api = new apigateway.HttpApi(this, 'Api', {
+      apiName: 'irrigation-controllers',
+      createDefaultStage: false,
+      defaultAuthorizer: new HttpUserPoolAuthorizer('AppUsers', props.userPool, {
+        userPoolClients: [props.appClient],
+      }),
+    });
+
+    // The claim code is too long to guess, so this only limits the cost.
+    const stage = new apigateway.HttpStage(this, 'ApiStage', {
+      httpApi: api,
+      stageName: '$default',
+      autoDeploy: true,
+      throttle: { rateLimit: 20, burstLimit: 40 },
+    });
+
+    const integration = new HttpLambdaIntegration('ControllersApiIntegration', handler);
+    for (const [method, routePath] of [
+      [apigateway.HttpMethod.GET, '/controllers'],
+      [apigateway.HttpMethod.POST, '/controllers/{deviceId}/claim'],
+      [apigateway.HttpMethod.PUT, '/controllers/{deviceId}/name'],
+    ] as const) {
+      api.addRoutes({ path: routePath, methods: [method], integration });
+    }
+
+    new CfnOutput(this, 'ApiUrl', { value: stage.url });
+    new CfnOutput(this, 'ControllersApiName', { value: handler.functionName });
   }
 
   /** Each controller may connect as itself and reach only its own topics. */
