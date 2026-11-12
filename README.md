@@ -11,6 +11,7 @@ Region: `us-east-1`, the same as the controllers' AWS IoT endpoint.
 | `Irrigation-Auth` | Cognito user pool the app signs in to, with native Google sign-in | GitHub Actions, on every push to `main` |
 | `Irrigation-Controllers` | What every controller shares in AWS IoT (its policies, the Fleet Provisioning template and the registration hook), who may reach which controller, and the API for it | You, from your computer |
 | `Irrigation-GithubDeploy` | Lets GitHub Actions deploy without stored AWS keys (OIDC) | You, once, from your computer |
+| `Irrigation-Firmware` | Firmware updates for every controller through AWS IoT Jobs: the bucket for firmware images and the roles to release and download them | You, from your computer |
 
 ### Irrigation-Auth: native Google sign-in
 
@@ -31,9 +32,13 @@ Outputs: `UserPoolId`, `AppClientId`, `Region`. The app needs them in its `confi
 
 Nothing here is per controller. A new controller registers through the template, gets its own certificate and Thing, and reaches only its own topics.
 
-- **`ESP32IrrigationDevicePolicy`:** a controller connects as itself and reaches only its own topics, following the [MQTT contract](https://github.com/ilijamishov/ESP32-Irrigation/blob/main/docs/mqtt-contract.md).
+- **`ESP32IrrigationDevicePolicy`:** a controller connects as itself and reaches only its own topics, following the [MQTT contract](https://github.com/ilijamishov/ESP32-Irrigation/blob/main/docs/mqtt-contract.md). It is close to AWS IoT's limit of 2,048 characters per policy, so new permissions go into a policy of their own.
 - **`ESP32IrrigationClaimProvisioningPolicy`:** the certificate in every firmware image may only register, connecting as `prov-<deviceId>`.
-- **`ESP32IrrigationFleetProvisioning`:** creates the certificate and the Thing, named by the device ID.
+- **`ESP32IrrigationFleetProvisioning`:** creates the certificate and the Thing, named by the device ID, in the group `irrigation-controllers`.
+- **`irrigation-controllers`:** the thing group of every controller, which firmware updates are sent to. Controllers registered before the group existed are added once with `scripts/add-controllers-to-group.ts` ([docs/DEPLOYMENT.md](docs/DEPLOYMENT.md#firmware-updates-first-time)).
+- **`ESP32IrrigationJobsPolicy`:** attached to that group, so every controller in it may use the AWS IoT Jobs topics of its own Thing: hear of its next job (`jobs/notify-next`), ask for it (`jobs/$next/get`) and report how it went (`jobs/<jobId>/update`). AWS IoT applies a group's policies to a controller because it connects with its Thing name as client ID. CloudFormation can't attach a policy to a group, so a custom resource calls `AttachPolicy`.
+
+The group, the Jobs policy and its attachment are kept if the stack is deleted.
 - **Registration hook:** a Lambda that runs before each registration. It refuses anything that isn't a device ID, and any device ID that already has a Thing. Otherwise someone who extracted the claim certificate from a firmware image could get a valid certificate for an existing controller. Any failure also refuses.
 
 The design is in the app repo's [docs/claiming.md](https://github.com/ilijamishov/Mobile-Irrigation/blob/main/docs/claiming.md).
@@ -91,6 +96,16 @@ An IAM OIDC provider for GitHub and the role `irrigation-github-deploy`. The rol
 
 GitHub's OIDC subject for this repository uses the **immutable format** with numeric IDs, `repo:ilijamishov@17722294/Backend-Irrigation@1444921207:ref:refs/heads/main` (repositories created since mid-2026 get it by default). The role trusts only that subject, so a repository deleted and recreated under the same name can't deploy. The IDs are in `cdk.json`; both come from `https://api.github.com/repos/ilijamishov/Backend-Irrigation` (`owner.id` and `id`). A failed sign-in shows the subject GitHub actually sent in CloudTrail (`AssumeRoleWithWebIdentity`, `userIdentity.principalId`).
 
+### Irrigation-Firmware: firmware updates
+
+A version tag (`v1.2.0`) in the firmware repository makes its GitHub Actions workflow upload the image to the firmware bucket and create an AWS IoT job for the group `irrigation-controllers`. AWS IoT gives each controller a link to the image that is valid for a short time; the controller downloads and installs it when it is idle. The firmware side and the release workflow belong to the firmware repository and are not built yet.
+
+- **Firmware bucket:** private, encrypted, HTTPS only and versioned; images are under `firmware/`. Replaced versions are deleted after 90 days. The bucket is kept if the stack is deleted.
+- **Download role:** AWS IoT Jobs signs the download links with it, and it may only read `firmware/`. Controllers have no S3 permissions of their own.
+- **`irrigation-firmware-release`:** the role the firmware repository's workflow uses. It trusts **only** version tags (`refs/tags/v*`) of `ilijamishov/ESP32-Irrigation`, through the GitHub OIDC provider of `Irrigation-GithubDeploy`, in the same immutable subject format. It may upload to `firmware/`, create, describe and cancel jobs whose ID starts with `firmware-` for the controller group only, and pass the download role to AWS IoT.
+
+Outputs: `FirmwareBucketName`, `JobsDownloadRoleArn`, and `ReleaseRoleArn`, which the firmware repository needs as the GitHub variable `AWS_RELEASE_ROLE_ARN`.
+
 ## Configuration
 
 `cdk.json` holds the settings. None of them are secrets:
@@ -100,6 +115,8 @@ GitHub's OIDC subject for this repository uses the **immutable format** with num
 | `region` | `us-east-1` |
 | `githubRepository` | `ilijamishov/Backend-Irrigation` |
 | `githubOwnerId`, `githubRepositoryId` | GitHub's numeric IDs of the owner and the repository, for the OIDC subject |
+| `firmwareRepository` | `ilijamishov/ESP32-Irrigation`, whose version tags release firmware |
+| `firmwareRepositoryId` | GitHub's numeric ID of the firmware repository (same owner) |
 | `provisioningRoleArn` | The existing role that lets AWS IoT register controllers |
 | `iotDataEndpoint` | This account's AWS IoT data endpoint (`aws iot describe-endpoint --endpoint-type iot:Data-ATS`) |
 | `googleWebClientId` | The **web** OAuth client ID from Google Cloud (`….apps.googleusercontent.com`). Synthesis fails while it's the placeholder. Several IDs can be given, separated by commas. |
@@ -113,7 +130,7 @@ npm test         # unit tests of the Lambdas and the stacks
 npx cdk synth    # build the CloudFormation templates into cdk.out/
 ```
 
-The Lambdas are in `lambda/`, bundled by esbuild (`NodejsFunction`) for Node.js 24 on ARM.
+The Lambdas are in `lambda/`, bundled by esbuild (`NodejsFunction`) for Node.js 24 on ARM. One-off scripts are in `scripts/`.
 
 ## First-time setup
 

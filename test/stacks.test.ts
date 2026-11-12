@@ -2,7 +2,12 @@ import { App } from 'aws-cdk-lib';
 import { Match, Template } from 'aws-cdk-lib/assertions';
 
 import { AuthStack } from '../lib/auth-stack';
-import { GithubDeployStack, githubSubject } from '../lib/github-deploy-stack';
+import {
+  GithubDeployStack,
+  githubOidcProviderArn,
+  githubRepositorySubject,
+  githubSubject,
+} from '../lib/github-deploy-stack';
 
 const env = { account: '123456789012', region: 'us-east-1' };
 
@@ -108,6 +113,24 @@ describe('GithubDeployStack', () => {
     expect(githubSubject({ ...base, repository: 'o/r' })).toBe('repo:o@1/r@2:ref:refs/heads/main');
     expect(() => githubSubject({ ...base, repository: 'no-slash' })).toThrow(/owner\/name/);
     expect(() => githubSubject({ ...base, repository: 'o/r', ownerId: 'abc' })).toThrow(/numeric/);
+  });
+
+  it('builds the subject of a repository without a ref, for other refs such as tags', () => {
+    expect(githubRepositorySubject({ repository: 'o/r', ownerId: '1', repositoryId: '2' })).toBe(
+      'repo:o@1/r@2',
+    );
+    expect(() =>
+      githubRepositorySubject({ repository: 'o/r/x', ownerId: '1', repositoryId: '2' }),
+    ).toThrow(/owner\/name/);
+  });
+
+  it('names the OIDC provider it creates, for roles in other stacks', () => {
+    expect(githubOidcProviderArn('123456789012')).toBe(
+      'arn:aws:iam::123456789012:oidc-provider/token.actions.githubusercontent.com',
+    );
+    template.hasResourceProperties('AWS::IAM::OIDCProvider', {
+      Url: 'https://token.actions.githubusercontent.com',
+    });
   });
 
   it('may only hand over to the CDK bootstrap roles', () => {

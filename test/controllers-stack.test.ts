@@ -9,8 +9,10 @@ import {
   ACCESS_TABLE_NAME,
   AUTHORIZER_NAME,
   CLAIM_POLICY_NAME,
+  CONTROLLER_GROUP_NAME,
   ControllersStack,
   DEVICE_POLICY_NAME,
+  JOBS_POLICY_NAME,
   TEMPLATE_NAME,
 } from '../lib/controllers-stack';
 
@@ -46,6 +48,14 @@ function policyNamed(template: Template, name: string) {
     template.findResources('AWS::IoT::Policy', { Properties: { PolicyName: name } }),
   );
   return resource.Properties.PolicyDocument;
+}
+
+/** AWS IoT refuses a policy longer than this, not counting whitespace. */
+const POLICY_SIZE_LIMIT = 2048;
+
+function registrationTemplate(template: Template) {
+  const [resource] = Object.values(template.findResources('AWS::IoT::ProvisioningTemplate'));
+  return JSON.parse(resource.Properties.TemplateBody);
 }
 
 describe('ControllersStack', () => {
@@ -109,6 +119,16 @@ describe('ControllersStack', () => {
     }
   });
 
+  it('keeps every policy within the size AWS IoT accepts', () => {
+    const policies = Object.values(template.findResources('AWS::IoT::Policy'));
+
+    expect(policies.length).toBeGreaterThanOrEqual(3);
+    for (const policy of policies) {
+      const size = JSON.stringify(policy.Properties.PolicyDocument).replace(/\s/g, '').length;
+      expect(size).toBeLessThanOrEqual(POLICY_SIZE_LIMIT);
+    }
+  });
+
   it('follows the MQTT contract: what a controller retains, sends and receives', () => {
     const [retained, sent, subscribed, received] = policyNamed(
       template,
@@ -128,6 +148,106 @@ describe('ControllersStack', () => {
     expect(topicNames(sent)).toEqual(['ack', 'telemetry']);
     expect(topicNames(subscribed)).toEqual(['config', 'command', 'schedule']);
     expect(topicNames(received)).toEqual(['config', 'command', 'schedule']);
+  });
+
+  it('lets a controller get its own next job and report on it, and nothing else', () => {
+    const statements = policyNamed(template, JOBS_POLICY_NAME).Statement;
+    const [published, subscribed, received] = statements;
+    const jobs = (type: string, names: string[]) =>
+      names.map((name) => `${iot}:${type}/$aws/things/${thing}/jobs/${name}`);
+    const replies = [
+      'notify-next',
+      '$next/get/accepted',
+      '$next/get/rejected',
+      '*/update/accepted',
+      '*/update/rejected',
+    ];
+
+    expect(published).toEqual({
+      Effect: 'Allow',
+      Action: 'iot:Publish',
+      Resource: jobs('topic', ['$next/get', '*/update']),
+    });
+    expect(subscribed).toEqual({
+      Effect: 'Allow',
+      Action: 'iot:Subscribe',
+      Resource: jobs('topicfilter', replies),
+    });
+    expect(received).toEqual({
+      Effect: 'Allow',
+      Action: 'iot:Receive',
+      Resource: jobs('topic', replies),
+    });
+    expect(statements).toHaveLength(3);
+  });
+
+  describe('the controller group', () => {
+    it('exists, and is kept if the stack is deleted', () => {
+      template.hasResource('AWS::IoT::ThingGroup', {
+        Properties: { ThingGroupName: CONTROLLER_GROUP_NAME },
+        DeletionPolicy: 'Retain',
+        UpdateReplacePolicy: 'Retain',
+      });
+    });
+
+    it('gets every controller that registers', () => {
+      expect(registrationTemplate(template).Resources.thing.Properties.ThingGroups).toEqual([
+        CONTROLLER_GROUP_NAME,
+      ]);
+    });
+
+    it('is created before the template can add a controller to it', () => {
+      const [groupId] = Object.keys(template.findResources('AWS::IoT::ThingGroup'));
+      const [resource] = Object.values(template.findResources('AWS::IoT::ProvisioningTemplate'));
+
+      expect(resource.DependsOn).toContain(groupId);
+    });
+
+    it('has the Jobs policy attached, so every controller in it gets it', () => {
+      const [attachment] = Object.values(template.findResources('Custom::AWS'));
+      const create = JSON.parse(attachment.Properties.Create);
+
+      expect(create).toMatchObject({
+        service: '@aws-sdk/client-iot',
+        action: 'AttachPolicy',
+        parameters: {
+          policyName: JOBS_POLICY_NAME,
+          target: `${iot}:thinggroup/${CONTROLLER_GROUP_NAME}`,
+        },
+      });
+      expect(attachment.Properties.Update).toBe(attachment.Properties.Create);
+      // Deleting the stack keeps the group and its policy, so nothing detaches.
+      expect(attachment.Properties.Delete).toBeUndefined();
+    });
+
+    it('attaches only after the group and the policy exist', () => {
+      const [groupId] = Object.keys(template.findResources('AWS::IoT::ThingGroup'));
+      const [policyId] = Object.keys(
+        template.findResources('AWS::IoT::Policy', {
+          Properties: { PolicyName: JOBS_POLICY_NAME },
+        }),
+      );
+      const [attachment] = Object.values(template.findResources('Custom::AWS'));
+
+      expect(attachment.DependsOn).toEqual(expect.arrayContaining([groupId, policyId]));
+    });
+
+    it('may only attach policies to the group, for the attachment', () => {
+      template.hasResourceProperties('AWS::IAM::Policy', {
+        PolicyDocument: {
+          Statement: [
+            {
+              Action: 'iot:AttachPolicy',
+              Effect: 'Allow',
+              Resource: [
+                `${iot}:thinggroup/${CONTROLLER_GROUP_NAME}`,
+                `${iot}:policy/${JOBS_POLICY_NAME}`,
+              ],
+            },
+          ],
+        },
+      });
+    });
   });
 
   it('runs the hook before a controller registers', () => {
@@ -170,8 +290,7 @@ describe('ControllersStack', () => {
   });
 
   it('registers controllers under their device ID with the device policy', () => {
-    const [resource] = Object.values(template.findResources('AWS::IoT::ProvisioningTemplate'));
-    const body = JSON.parse(resource.Properties.TemplateBody);
+    const body = registrationTemplate(template);
 
     expect(body.Resources.thing.Properties.ThingName).toEqual({
       'Fn::Join': ['', ['', { Ref: 'SerialNumber' }]],
@@ -407,6 +526,15 @@ describe('ControllersStack', () => {
       imported.resourceCountIs('AWS::DynamoDB::GlobalTable', 0);
       imported.resourceCountIs('AWS::ApiGatewayV2::Api', 0);
       imported.resourceCountIs('AWS::IoT::Authorizer', 0);
+      imported.resourceCountIs('AWS::IoT::ThingGroup', 0);
+      imported.resourceCountIs('Custom::AWS', 0);
+      expect(
+        Object.keys(
+          imported.findResources('AWS::IoT::Policy', {
+            Properties: { PolicyName: JOBS_POLICY_NAME },
+          }),
+        ),
+      ).toHaveLength(0);
 
       const [resource] = Object.values(imported.findResources('AWS::IoT::ProvisioningTemplate'));
       expect(resource.Properties.PreProvisioningHook).toBeUndefined();
@@ -424,6 +552,17 @@ describe('ControllersStack', () => {
       expect(policyNamed(imported, DEVICE_POLICY_NAME)).toEqual(
         policyNamed(template, DEVICE_POLICY_NAME),
       );
+    });
+
+    it('describes the template as it was, adding controllers to no group', () => {
+      const before = registrationTemplate(imported);
+      const after = registrationTemplate(template);
+
+      expect(before.Resources.thing.Properties.ThingGroups).toEqual([]);
+      expect({ ...before.Resources.thing.Properties, ThingGroups: undefined }).toEqual({
+        ...after.Resources.thing.Properties,
+        ThingGroups: undefined,
+      });
     });
 
     it('maps every imported resource in the import file', () => {

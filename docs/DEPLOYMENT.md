@@ -11,6 +11,7 @@ There is one environment: one AWS account, in `us-east-1`. Development and real 
 | `Irrigation-Auth` | Sign-in (Cognito) | Automatically, by GitHub Actions, on every push to `main` that passes the tests |
 | `Irrigation-Controllers` | The API, the AWS IoT policies and template, the app authorizer, the table `irrigation-access` | **By hand**, from your computer |
 | `Irrigation-GithubDeploy` | What lets GitHub Actions deploy | By hand, and rarely |
+| `Irrigation-Firmware` | The firmware bucket, and the roles that release firmware and sign its download links | By hand, and rarely |
 
 **Pushing to `main` doesn't deploy `Irrigation-Controllers`.** A change to the API or to AWS IoT isn't live until you run the deploy below.
 
@@ -59,12 +60,38 @@ The app reads these outputs at build time ([its deployment guide](https://github
 | `Irrigation-Controllers`: `ApiUrl` | `API_URL` |
 | `Irrigation-Controllers`: `IotAuthorizerName` | `MQTT_AUTHORIZER` |
 
+The firmware repository needs one, as a GitHub Actions variable:
+
+| Stack output | Firmware repository variable |
+|---|---|
+| `Irrigation-Firmware`: `ReleaseRoleArn` | `AWS_RELEASE_ROLE_ARN` |
+
 Other settings are in `cdk.json`. The time zone table only needs regenerating when a country changes its rules (see the README).
 
 ## Order, when other projects are involved
 
 - **A new API route or field:** deploy the backend first, then release the app.
-- **A change to a topic in the MQTT contract:** add it to the device policy and deploy **before** flashing firmware that uses it. AWS IoT closes the controller's connection on a topic the policy doesn't allow.
+- **A change to a topic in the MQTT contract:** add it to the device policy and deploy **before** flashing firmware that uses it. AWS IoT closes the controller's connection on a topic the policy doesn't allow. The same goes for the AWS IoT Jobs topics that firmware updates use.
+
+## Firmware updates, first time
+
+Done once, before the first firmware that updates itself is flashed:
+
+1. **Make sure there is no group `irrigation-controllers` yet** (`aws iot list-thing-groups --profile irrigation`). The stack creates it, and fails if it already exists. One may be left over from a failed deploy, because the group is kept on a rollback; delete it if it has no controllers in it (`aws iot delete-thing-group --thing-group-name irrigation-controllers --profile irrigation`).
+2. **Check the firmware repository's ID** in `cdk.json` (`firmwareRepositoryId`, set to `1410996714`). It only changes if the repository is recreated. The repository is private, so read it while signed in to GitHub: the page source of the repository has it in `octolytics-dimension-repository_id`.
+3. **Deploy `Irrigation-Controllers`** as in [Deploy a change](#deploy-a-change). The diff shows the template, the new group `irrigation-controllers`, the new policy `ESP32IrrigationJobsPolicy` and its attachment to the group. The device policy doesn't change, so controllers stay connected.
+4. **Add the controllers registered so far to the group.** New ones join it as they register.
+   ```powershell
+   $env:AWS_PROFILE = 'irrigation'
+   npx.cmd ts-node scripts/add-controllers-to-group.ts
+   ```
+   It prints the controllers in the group. Running it again changes nothing.
+5. **Deploy `Irrigation-Firmware`:**
+   ```powershell
+   npx.cmd cdk deploy Irrigation-Firmware --profile irrigation
+   ```
+   It asks for confirmation, because it creates IAM roles. It needs `Irrigation-GithubDeploy`, whose GitHub OIDC provider its release role uses.
+6. **In the firmware repository on GitHub,** open Settings → Secrets and variables → Actions → **Variables**, and add `AWS_RELEASE_ROLE_ARN` with the output `ReleaseRoleArn`.
 
 ## Undoing a deploy
 
@@ -73,6 +100,7 @@ Revert the commit, then deploy again as above. There is no separate rollback ste
 - **The table and users stay.** The table, the user pool and the AWS IoT resources are kept even if a stack is deleted, so a code rollback doesn't lose them.
 - **Data written by the newer version stays too,** so check that the older code can read it.
 - **AWS IoT keeps at most 5 versions of a policy.** If a policy deploy fails because of that, delete an old unused version.
+- **A policy may have at most 2,048 characters**, not counting whitespace. The device policy is close to it, so a deploy that adds to it fails and rolls back; a test checks the size of every policy.
 
 ## Setting up from nothing
 

@@ -15,5 +15,5 @@
     "types": ["node", "jest"],
     "outDir": "cdk.out/tsc"
   },
-  "include": ["bin", "lib", "lambda", "test"]
+  "include": ["bin", "lib", "lambda", "scripts", "test"]
 }

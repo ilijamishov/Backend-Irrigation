@@ -2,7 +2,8 @@
 import { App } from 'aws-cdk-lib';
 
 import { AuthStack } from '../lib/auth-stack';
-import { ControllersStack } from '../lib/controllers-stack';
+import { CONTROLLER_GROUP_NAME, ControllersStack } from '../lib/controllers-stack';
+import { FirmwareStack } from '../lib/firmware-stack';
 import { GithubDeployStack } from '../lib/github-deploy-stack';
 
 const app = new App();
@@ -47,4 +48,17 @@ new GithubDeployStack(app, 'Irrigation-GithubDeploy', {
   ownerId: context('githubOwnerId'),
   repositoryId: context('githubRepositoryId'),
   branch: 'main',
+});
+
+new FirmwareStack(app, 'Irrigation-Firmware', {
+  env,
+  description: 'Firmware updates for every irrigation controller through AWS IoT Jobs',
+  firmwareRepository: {
+    repository: context('firmwareRepository'),
+    ownerId: context('githubOwnerId'),
+    repositoryId: context('firmwareRepositoryId'),
+  },
+  // By name, not a reference: a cross-stack export would tie the stacks'
+  // deploy order. The Controllers stack creates the group.
+  controllerGroupName: CONTROLLER_GROUP_NAME,
 });

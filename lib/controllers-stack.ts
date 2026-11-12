@@ -11,15 +11,25 @@ import * as iot from 'aws-cdk-lib/aws-iot';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
 import { NodejsFunction, OutputFormat } from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as logs from 'aws-cdk-lib/aws-logs';
+import {
+  AwsCustomResource,
+  AwsCustomResourcePolicy,
+  type AwsSdkCall,
+  PhysicalResourceId,
+} from 'aws-cdk-lib/custom-resources';
 import type { Construct } from 'constructs';
 
 import { EXPIRY_ATTRIBUTE } from '../lambda/controllers/connections';
 
 export const DEVICE_POLICY_NAME = 'ESP32IrrigationDevicePolicy';
+/** Firmware updates through AWS IoT Jobs, attached to the controller group. */
+export const JOBS_POLICY_NAME = 'ESP32IrrigationJobsPolicy';
 export const CLAIM_POLICY_NAME = 'ESP32IrrigationClaimProvisioningPolicy';
 export const TEMPLATE_NAME = 'ESP32IrrigationFleetProvisioning';
 export const ACCESS_TABLE_NAME = 'irrigation-access';
 export const AUTHORIZER_NAME = 'irrigation-app';
+/** Every registered controller; firmware updates are sent to this group. */
+export const CONTROLLER_GROUP_NAME = 'irrigation-controllers';
 /** Where the time zone map is in the API's Lambda package. */
 const TIME_ZONE_MAP_FOLDER = 'time-zone-map';
 const TIME_ZONE_MAP_FILE = 'timezones.geojson.geo.dat';
@@ -76,11 +86,15 @@ export class ControllersStack extends Stack {
         templateType: 'FLEET_PROVISIONING',
         enabled: true,
         provisioningRoleArn: props.provisioningRoleArn,
-        templateBody: JSON.stringify(registrationTemplate()),
+        // Before: new controllers joined no group.
+        templateBody: JSON.stringify(registrationTemplate(importPhase ? [] : [CONTROLLER_GROUP_NAME])),
       }),
     );
 
     if (importPhase) return;
+
+    // A registration adds the new Thing to the group, so it must exist first.
+    template.node.addDependency(this.addControllerGroup());
 
     const hook = new NodejsFunction(this, 'RegistrationHook', {
       entry: path.join(__dirname, '..', 'lambda', 'controllers', 'registration-hook.ts'),
@@ -121,6 +135,53 @@ export class ControllersStack extends Stack {
     new CfnOutput(this, 'RegistrationHookName', { value: hook.functionName });
 
     this.addApi(props);
+  }
+
+  /**
+   * The group of every controller, which firmware updates are sent to, with
+   * the policy for AWS IoT Jobs attached to it. AWS IoT applies a group's
+   * policies to its members, because a controller connects with its Thing name
+   * as client ID. The Jobs topics are a policy of their own: the device policy
+   * is close to AWS IoT's limit of 2,048 characters.
+   *
+   * All of it is kept if the stack is deleted, like the rest of what
+   * controllers depend on.
+   */
+  private addControllerGroup(): Construct {
+    const group = new iot.CfnThingGroup(this, 'ControllerGroup', {
+      thingGroupName: CONTROLLER_GROUP_NAME,
+      thingGroupProperties: { thingGroupDescription: 'Every registered irrigation controller' },
+    });
+    group.applyRemovalPolicy(RemovalPolicy.RETAIN);
+
+    const policy = new iot.CfnPolicy(this, 'JobsPolicy', {
+      policyName: JOBS_POLICY_NAME,
+      policyDocument: { Version: '2012-10-17', Statement: this.jobsStatements() },
+    });
+    policy.applyRemovalPolicy(RemovalPolicy.RETAIN);
+
+    const groupArn = this.iotArn(`thinggroup/${CONTROLLER_GROUP_NAME}`);
+    // CloudFormation can't attach a policy to a thing group. Attaching again
+    // changes nothing, and nothing is detached, so the controllers keep it.
+    const attachment = new AwsCustomResource(this, 'JobsPolicyAttachment', {
+      onCreate: attachPolicy(JOBS_POLICY_NAME, groupArn),
+      onUpdate: attachPolicy(JOBS_POLICY_NAME, groupArn),
+      policy: AwsCustomResourcePolicy.fromStatements([
+        new iam.PolicyStatement({
+          actions: ['iot:AttachPolicy'],
+          resources: [groupArn, this.iotArn(`policy/${JOBS_POLICY_NAME}`)],
+        }),
+      ]),
+      installLatestAwsSdk: false,
+      logGroup: new logs.LogGroup(this, 'JobsPolicyAttachmentLogs', {
+        retention: logs.RetentionDays.ONE_MONTH,
+        removalPolicy: RemovalPolicy.DESTROY,
+      }),
+    });
+    attachment.node.addDependency(group, policy);
+
+    new CfnOutput(this, 'ControllerGroupName', { value: CONTROLLER_GROUP_NAME });
+    return group;
   }
 
   /** Who owns and manages which controller, and the API the app reads it with. */
@@ -361,6 +422,36 @@ export class ControllersStack extends Stack {
     };
   }
 
+  /**
+   * Firmware updates through AWS IoT Jobs: the controller hears of its next
+   * job, asks for it, and reports how it went. Only its own Thing's jobs.
+   */
+  private jobsStatements(): object[] {
+    const jobs = (type: string, name: string) =>
+      this.iotArn(`${type}/$aws/things/${THING}/jobs/${name}`);
+    const replies = ['notify-next', '$next/get/accepted', '$next/get/rejected'];
+    // `+` in a subscription is the job ID; `*` matches it in the policy.
+    const updateReplies = ['*/update/accepted', '*/update/rejected'];
+
+    return [
+      {
+        Effect: 'Allow',
+        Action: 'iot:Publish',
+        Resource: ['$next/get', '*/update'].map((name) => jobs('topic', name)),
+      },
+      {
+        Effect: 'Allow',
+        Action: 'iot:Subscribe',
+        Resource: [...replies, ...updateReplies].map((name) => jobs('topicfilter', name)),
+      },
+      {
+        Effect: 'Allow',
+        Action: 'iot:Receive',
+        Resource: [...replies, ...updateReplies].map((name) => jobs('topic', name)),
+      },
+    ];
+  }
+
   /** The certificate in every firmware image may do nothing but register. */
   private claimPolicy(clientResource: string): object {
     const provisioning = (type: string) => [
@@ -383,6 +474,16 @@ export class ControllersStack extends Stack {
   }
 }
 
+/** The SDK call that attaches [policyName] to the thing group [groupArn]. */
+function attachPolicy(policyName: string, groupArn: string): AwsSdkCall {
+  return {
+    service: '@aws-sdk/client-iot',
+    action: 'AttachPolicy',
+    parameters: { policyName, target: groupArn },
+    physicalResourceId: PhysicalResourceId.of(`${policyName}@${CONTROLLER_GROUP_NAME}`),
+  };
+}
+
 /** In Node, because the bundling runs on Windows and on Linux. */
 function copyFileCommand(source: string, target: string): string {
   const script = [
@@ -393,8 +494,11 @@ function copyFileCommand(source: string, target: string): string {
   return `node -e "${script}" "${source}" "${target}"`;
 }
 
-/** Creates the certificate and the Thing, named by the controller's device ID. */
-function registrationTemplate(): object {
+/**
+ * Creates the certificate and the Thing, named by the controller's device ID,
+ * in [thingGroups].
+ */
+function registrationTemplate(thingGroups: string[]): object {
   return {
     Parameters: {
       SerialNumber: { Type: 'String' },
@@ -421,7 +525,7 @@ function registrationTemplate(): object {
         },
         Properties: {
           AttributePayload: {},
-          ThingGroups: [],
+          ThingGroups: thingGroups,
           ThingName: { 'Fn::Join': ['', ['', { Ref: 'SerialNumber' }]] },
         },
       },
