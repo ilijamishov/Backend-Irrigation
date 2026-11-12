@@ -1,7 +1,7 @@
 import { createHash, randomInt, randomUUID } from 'node:crypto';
 
 import type { AccessStore, UserController } from './access-store';
-import type { EmailDirectory } from './email-directory';
+import type { EmailDirectory } from './cognito-users';
 import type { Invitation, Member, SharingStore } from './sharing-store';
 
 /** How long an invitation can be accepted (docs/user-roles.md §6.1). */

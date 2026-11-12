@@ -144,6 +144,14 @@ export class DynamoSharingStore implements SharingStore {
 
   acceptInvitation(invitation: Invitation, manager: Member): Promise<boolean> {
     return this.transact([
+      // Not onto a controller that was released meanwhile.
+      {
+        ConditionCheck: {
+          TableName: this.tableName,
+          Key: { PK: controllerKey(invitation.deviceId), SK: META },
+          ConditionExpression: 'attribute_exists(PK)',
+        },
+      },
       {
         Put: {
           TableName: this.tableName,

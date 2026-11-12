@@ -201,10 +201,11 @@ export class ControllersStack extends Stack {
       }),
     );
 
-    // The email of a new Manager, so the Owner can tell them apart.
+    // The email of a new Manager, so the Owner can tell them apart, and
+    // deleting the sign-in of a user who deletes their account.
     handler.addToRolePolicy(
       new iam.PolicyStatement({
-        actions: ['cognito-idp:AdminGetUser'],
+        actions: ['cognito-idp:AdminGetUser', 'cognito-idp:AdminDeleteUser'],
         // From the ID, which the Auth stack already exports: a new export would
         // tie the order the two stacks deploy in.
         resources: [
@@ -249,6 +250,9 @@ export class ControllersStack extends Stack {
       [apigateway.HttpMethod.GET, '/controllers/{deviceId}/people'],
       [apigateway.HttpMethod.DELETE, '/controllers/{deviceId}/people/{userId}'],
       [apigateway.HttpMethod.DELETE, '/controllers/{deviceId}/access'],
+      [apigateway.HttpMethod.POST, '/controllers/{deviceId}/transfer'],
+      [apigateway.HttpMethod.DELETE, '/controllers/{deviceId}'],
+      [apigateway.HttpMethod.DELETE, '/account'],
     ] as const) {
       api.addRoutes({ path: routePath, methods: [method], integration });
     }

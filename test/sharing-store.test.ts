@@ -137,10 +137,15 @@ describe('DynamoSharingStore', () => {
         }),
       ).resolves.toBe(true);
 
-      const [put, ...deletes] = transactionOf(client.sent) as Record<
+      const [check, put, ...deletes] = transactionOf(client.sent) as Record<
         string,
         Record<string, unknown>
       >[];
+      // Not onto a controller released meanwhile.
+      expect(check.ConditionCheck).toMatchObject({
+        Key: { PK, SK: 'META' },
+        ConditionExpression: 'attribute_exists(PK)',
+      });
       expect(put.Put).toMatchObject({
         Item: { PK, SK: 'USER#m', userId: 'm', role: 'manager', email: 'm@example.com' },
         ConditionExpression: 'attribute_not_exists(PK)',

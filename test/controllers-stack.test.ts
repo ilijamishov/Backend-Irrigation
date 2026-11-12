@@ -235,6 +235,9 @@ describe('ControllersStack', () => {
       'GET /controllers/{deviceId}/people',
       'DELETE /controllers/{deviceId}/people/{userId}',
       'DELETE /controllers/{deviceId}/access',
+      'POST /controllers/{deviceId}/transfer',
+      'DELETE /controllers/{deviceId}',
+      'DELETE /account',
     ])('needs a token from the app for %s', (routeKey) => {
       template.hasResourceProperties('AWS::ApiGatewayV2::Route', {
         RouteKey: routeKey,
@@ -244,7 +247,7 @@ describe('ControllersStack', () => {
     });
 
     it('has no other routes', () => {
-      template.resourceCountIs('AWS::ApiGatewayV2::Route', 16);
+      template.resourceCountIs('AWS::ApiGatewayV2::Route', 19);
     });
 
     it('packs the time zone map where the Lambda looks for it', () => {
@@ -308,11 +311,14 @@ describe('ControllersStack', () => {
       });
     });
 
-    it('may read a user of the user pool, for a new Manager\'s email', () => {
+    it('may read and delete a user of the user pool, and nothing else there', () => {
       template.hasResourceProperties('AWS::IAM::Policy', {
         PolicyDocument: {
           Statement: Match.arrayWith([
-            Match.objectLike({ Action: 'cognito-idp:AdminGetUser', Effect: 'Allow' }),
+            Match.objectLike({
+              Action: ['cognito-idp:AdminGetUser', 'cognito-idp:AdminDeleteUser'],
+              Effect: 'Allow',
+            }),
           ]),
         },
       });

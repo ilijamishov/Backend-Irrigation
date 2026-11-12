@@ -10,6 +10,7 @@ import type {
 } from '../lambda/controllers/access-store';
 import { ControllersApi } from '../lambda/controllers/api';
 import type { ClaimOutcome } from '../lambda/controllers/claim-service';
+import type { AccountDeletion, Release, Transfer } from '../lambda/controllers/ownership-service';
 import type {
   InvitationAcceptance,
   InvitationCreation,
@@ -214,13 +215,19 @@ function setUp(outcome: ClaimOutcome = { result: 'pending' }) {
       }),
     ),
   };
+  const ownership = {
+    transfer: jest.fn(async (): Promise<Transfer> => ({ result: 'ok' })),
+    release: jest.fn(async (): Promise<Release> => ({ result: 'ok' })),
+    deleteAccount: jest.fn(async (): Promise<AccountDeletion> => ({ result: 'ok' })),
+  };
   return {
     store,
     claim,
     timeZoneAt,
     zones,
     sharing,
-    api: new ControllersApi(store, { claim }, { at: timeZoneAt }, zones, sharing),
+    ownership,
+    api: new ControllersApi(store, { claim }, { at: timeZoneAt }, zones, sharing, ownership),
   };
 }
 
@@ -858,6 +865,83 @@ describe('ControllersApi', () => {
 
       expect(response.statusCode).toBe(200);
       expect(sharing.leave).toHaveBeenCalledWith('alice', DEVICE_ID);
+    });
+
+    it('transfers a controller to a Manager named in the body', async () => {
+      const { api, ownership } = setUp();
+
+      const response = await api.handle(
+        event('POST /controllers/{deviceId}/transfer', {
+          body: JSON.stringify({ userId: MANAGER_ID }),
+        }),
+      );
+
+      expect(response.statusCode).toBe(200);
+      expect(ownership.transfer).toHaveBeenCalledWith('alice', DEVICE_ID, MANAGER_ID);
+    });
+
+    it('refuses a transfer to someone who is no user ID', async () => {
+      const { api, ownership } = setUp();
+
+      const response = await api.handle(
+        event('POST /controllers/{deviceId}/transfer', { body: JSON.stringify({ userId: 'x' }) }),
+      );
+
+      expect(response.statusCode).toBe(400);
+      expect(ownership.transfer).not.toHaveBeenCalled();
+    });
+
+    it('says when the new Owner is no Manager', async () => {
+      const { api, ownership } = setUp();
+      ownership.transfer.mockResolvedValue({ result: 'not_a_manager' });
+
+      const response = await api.handle(
+        event('POST /controllers/{deviceId}/transfer', {
+          body: JSON.stringify({ userId: MANAGER_ID }),
+        }),
+      );
+
+      expect(response.statusCode).toBe(404);
+    });
+
+    it('releases a controller', async () => {
+      const { api, ownership } = setUp();
+
+      const response = await api.handle(event('DELETE /controllers/{deviceId}'));
+
+      expect(response.statusCode).toBe(200);
+      expect(ownership.release).toHaveBeenCalledWith('alice', DEVICE_ID);
+    });
+
+    it('releases nothing for anyone but the Owner', async () => {
+      const { api, ownership } = setUp();
+      ownership.release.mockResolvedValue({ result: 'not_owner' });
+
+      const response = await api.handle(event('DELETE /controllers/{deviceId}'));
+
+      expect(response.statusCode).toBe(403);
+    });
+
+    it('deletes the account of the user in the token', async () => {
+      const { api, ownership } = setUp();
+
+      const response = await api.handle(event('DELETE /account'));
+
+      expect(response.statusCode).toBe(200);
+      expect(ownership.deleteAccount).toHaveBeenCalledWith('alice', 'google_1');
+    });
+
+    it('names the controllers the user still owns', async () => {
+      const { api, ownership } = setUp();
+      ownership.deleteAccount.mockResolvedValue({
+        result: 'owns_controllers',
+        deviceIds: [DEVICE_ID],
+      });
+
+      const response = await api.handle(event('DELETE /account'));
+
+      expect(response.statusCode).toBe(409);
+      expect(parsed(response)).toEqual({ error: 'owns_controllers', deviceIds: [DEVICE_ID] });
     });
 
     it('tells the Owner they can\'t leave', async () => {

@@ -16,7 +16,9 @@ import {
 import { IotClaimReportSource } from './claim-report';
 import { type ClaimOutcome, ClaimService } from './claim-service';
 import { AccessRevoker, DynamoConnectionRegistry, IotConnectionCloser } from './connections';
-import { CognitoEmailDirectory } from './email-directory';
+import { CognitoUsers } from './cognito-users';
+import { OwnershipService } from './ownership-service';
+import { DynamoOwnershipStore } from './ownership-store';
 import { isInvitationCode, SharingService } from './sharing-service';
 import { DynamoSharingStore, type Invitation, type Member } from './sharing-store';
 import { MapTimeZoneLookup, type TimeZoneLookup } from './time-zones';
@@ -63,6 +65,7 @@ export class ControllersApi {
       | 'removeManager'
       | 'leave'
     >,
+    private readonly ownership: Pick<OwnershipService, 'transfer' | 'release' | 'deleteAccount'>,
   ) {}
 
   async handle(event: APIGatewayProxyEventV2WithJWTAuthorizer): Promise<Response> {
@@ -105,6 +108,12 @@ export class ControllersApi {
           return await this.removeManager(userId, event);
         case 'DELETE /controllers/{deviceId}/access':
           return await this.leave(userId, event);
+        case 'POST /controllers/{deviceId}/transfer':
+          return await this.transfer(userId, event);
+        case 'DELETE /controllers/{deviceId}':
+          return await this.release(userId, event);
+        case 'DELETE /account':
+          return await this.deleteAccount(userId, event);
         default:
           return error(404, 'not_found');
       }
@@ -302,6 +311,53 @@ export class ControllersApi {
 
     const { result } = await this.sharing.leave(userId, deviceId);
     return result === 'ok' ? json(200, {}) : sharingRefusal(result);
+  }
+
+  private async transfer(
+    userId: string,
+    event: APIGatewayProxyEventV2WithJWTAuthorizer,
+  ): Promise<Response> {
+    const deviceId = deviceIdOf(event);
+    const newOwnerId = bodyOf(event)?.userId;
+    if (!deviceId || typeof newOwnerId !== 'string' || !UUID.test(newOwnerId)) {
+      return error(400, 'invalid_request');
+    }
+
+    const { result } = await this.ownership.transfer(userId, deviceId, newOwnerId);
+    if (result !== 'ok') return sharingRefusal(result);
+
+    console.log(`Controller ${deviceId} transferred.`);
+    return json(200, {});
+  }
+
+  private async release(
+    userId: string,
+    event: APIGatewayProxyEventV2WithJWTAuthorizer,
+  ): Promise<Response> {
+    const deviceId = deviceIdOf(event);
+    if (!deviceId) return error(400, 'invalid_request');
+
+    const { result } = await this.ownership.release(userId, deviceId);
+    if (result !== 'ok') return sharingRefusal(result);
+
+    console.log(`Controller ${deviceId} released.`);
+    return json(200, {});
+  }
+
+  private async deleteAccount(
+    userId: string,
+    event: APIGatewayProxyEventV2WithJWTAuthorizer,
+  ): Promise<Response> {
+    const username = event.requestContext.authorizer?.jwt?.claims?.username;
+    if (typeof username !== 'string') return error(400, 'invalid_request');
+
+    const deletion = await this.ownership.deleteAccount(userId, username);
+    if (deletion.result === 'owns_controllers') {
+      return json(409, { error: 'owns_controllers', deviceIds: deletion.deviceIds });
+    }
+
+    console.log('An account was deleted.');
+    return json(200, {});
   }
 
   /** Never logs the position: it shows where the Owner lives. */
@@ -532,10 +588,14 @@ function fromEnvironment(environment: NodeJS.ProcessEnv = process.env): Controll
     new DynamoConnectionRegistry(documents, TABLE_NAME),
     new IotConnectionCloser(iotData),
   );
-  const sharing = new SharingService(
+  const sharingStore = new DynamoSharingStore(documents, TABLE_NAME);
+  const users = new CognitoUsers(new CognitoIdentityProviderClient({}), USER_POOL_ID);
+  const sharing = new SharingService(store, sharingStore, users, revoker);
+  const ownership = new OwnershipService(
     store,
-    new DynamoSharingStore(documents, TABLE_NAME),
-    new CognitoEmailDirectory(new CognitoIdentityProviderClient({}), USER_POOL_ID),
+    new DynamoOwnershipStore(documents, TABLE_NAME),
+    sharingStore,
+    users,
     revoker,
   );
 
@@ -545,6 +605,7 @@ function fromEnvironment(environment: NodeJS.ProcessEnv = process.env): Controll
     new MapTimeZoneLookup(),
     new ZoneService(store),
     sharing,
+    ownership,
   );
 }
 

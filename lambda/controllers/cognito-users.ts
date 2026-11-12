@@ -1,4 +1,5 @@
 import {
+  AdminDeleteUserCommand,
   AdminGetUserCommand,
   type CognitoIdentityProviderClient,
 } from '@aws-sdk/client-cognito-identity-provider';
@@ -9,7 +10,13 @@ export interface EmailDirectory {
   emailOf(username: string): Promise<string | null>;
 }
 
-export class CognitoEmailDirectory implements EmailDirectory {
+/** Deletes a user's sign-in, for account deletion. */
+export interface AccountRemover {
+  deleteUser(username: string): Promise<void>;
+}
+
+/** The users of the app's Cognito user pool. */
+export class CognitoUsers implements EmailDirectory, AccountRemover {
   constructor(
     private readonly client: Pick<CognitoIdentityProviderClient, 'send'>,
     private readonly userPoolId: string,
@@ -26,6 +33,18 @@ export class CognitoEmailDirectory implements EmailDirectory {
       const reason = error instanceof Error ? error.name : 'unknown';
       console.error(`Could not read a user's email (${reason}).`);
       return null;
+    }
+  }
+
+  /** Does nothing for a user that is gone already. */
+  async deleteUser(username: string): Promise<void> {
+    try {
+      await this.client.send(
+        new AdminDeleteUserCommand({ UserPoolId: this.userPoolId, Username: username }),
+      );
+    } catch (error) {
+      if (error instanceof Error && error.name === 'UserNotFoundException') return;
+      throw error;
     }
   }
 }
