@@ -5,14 +5,15 @@ import type { EmailDirectory } from './email-directory';
 import type { Invitation, Member, SharingStore } from './sharing-store';
 
 /** How long an invitation can be accepted (docs/user-roles.md §6.1). */
-export const INVITATION_DAYS = 3;
+export const INVITATION_LIFETIME_MS = 60 * 60 * 1000;
 /** Managers and pending invitations together, per controller. */
 export const MAX_MANAGERS = 10;
 
-/** Without 0, 1, I, L and O, which are easily mistaken when typed. */
-const CODE_ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
-export const CODE_LENGTH = 10;
-const DAY_MS = 86_400_000;
+/** Six digits, easy to read out and type. */
+export const CODE_LENGTH = 6;
+const CODE = /^\d{6}$/;
+/** A new code that happens to be in use is replaced by another. */
+const CODE_ATTEMPTS = 5;
 
 /** Revokes a user's open connections after their access changed. */
 export interface Revoker {
@@ -65,19 +66,25 @@ export class SharingService {
     const managers = members.filter((member) => member.role === 'manager');
     if (managers.length + invitations.length >= MAX_MANAGERS) return { result: 'limit_reached' };
 
-    const code = this.newCode();
-    const invitation: Invitation = {
-      invitationId: this.newId(),
-      deviceId,
-      codeHash: hashOf(code),
-      createdAt: new Date(this.now()).toISOString(),
-      expiresAt: new Date(this.now() + INVITATION_DAYS * DAY_MS).toISOString(),
-    };
+    for (let attempt = 1; attempt <= CODE_ATTEMPTS; attempt++) {
+      const code = this.newCode();
+      const invitation: Invitation = {
+        invitationId: this.newId(),
+        deviceId,
+        codeHash: hashOf(code),
+        createdAt: new Date(this.now()).toISOString(),
+        expiresAt: new Date(this.now() + INVITATION_LIFETIME_MS).toISOString(),
+      };
 
-    // Only fails if ownership changed meanwhile.
-    if (!(await this.store.addInvitation(userId, invitation))) return { result: 'not_owner' };
+      if (await this.store.addInvitation(userId, invitation)) {
+        return { result: 'ok', invitation, code };
+      }
+      // Either the code is in use by a pending invitation, or ownership
+      // changed meanwhile.
+      if (!(await this.isOwner(userId, deviceId))) return { result: 'not_owner' };
+    }
 
-    return { result: 'ok', invitation, code };
+    throw new Error('No free invitation code.');
   }
 
   async listInvitations(userId: string, deviceId: string): Promise<InvitationList> {
@@ -221,24 +228,19 @@ export class SharingService {
   }
 }
 
-/** Upper case, without the spaces and hyphens people type or share it with. */
+/** Without the spaces and hyphens people type or share it with. */
 export function normalizedCode(code: string): string {
-  return code.toUpperCase().replace(/[\s-]/g, '');
+  return code.replace(/[\s-]/g, '');
 }
 
 /** Whether [code], once normalized, could be an invitation code at all. */
 export function isInvitationCode(code: string): boolean {
-  const normalized = normalizedCode(code);
-  return (
-    normalized.length === CODE_LENGTH &&
-    [...normalized].every((character) => CODE_ALPHABET.includes(character))
-  );
+  return CODE.test(normalizedCode(code));
 }
 
-/** About 50 bits: far beyond guessing within 3 days at the API's rate limit. */
+/** Six random digits, leading zeros included. */
 function randomCode(): string {
-  return Array.from({ length: CODE_LENGTH }, () => CODE_ALPHABET[randomInt(CODE_ALPHABET.length)])
-    .join('');
+  return randomInt(10 ** CODE_LENGTH).toString().padStart(CODE_LENGTH, '0');
 }
 
 function hashOf(code: string): string {

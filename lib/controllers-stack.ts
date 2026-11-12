@@ -221,8 +221,9 @@ export class ControllersStack extends Stack {
       }),
     });
 
-    // The claim code is too long to guess, and an invitation code can't be
-    // guessed within its 3 days at this rate, so this only limits the cost.
+    // The claim code is too long to guess, so this mostly limits the cost. An
+    // invitation code of six digits could be guessed within its hour at this
+    // rate; that risk is accepted (the app repo's docs/user-roles.md §6.1).
     const stage = new apigateway.HttpStage(this, 'ApiStage', {
       httpApi: api,
       stageName: '$default',

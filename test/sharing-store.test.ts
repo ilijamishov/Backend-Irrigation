@@ -34,7 +34,8 @@ const invitation: Invitation = {
   expiresAt: '2026-11-15T10:00:00.000Z',
 };
 
-const store = (client: { send: never }) => new DynamoSharingStore(client, TABLE);
+const NOW = Date.parse('2026-11-12T10:30:00.000Z');
+const store = (client: { send: never }) => new DynamoSharingStore(client, TABLE, () => NOW);
 
 describe('DynamoSharingStore', () => {
   it('reads the people of a controller, with a Manager\'s email', async () => {
@@ -100,7 +101,10 @@ describe('DynamoSharingStore', () => {
       });
       expect(lookup.Put).toMatchObject({
         Item: { PK: 'INVITATION#hash-of-code', SK: 'META', deviceId: DEVICE_ID },
-        ConditionExpression: 'attribute_not_exists(PK)',
+        // A code of an expired invitation is free again.
+        ConditionExpression: 'attribute_not_exists(PK) OR #expiry < :now',
+        ExpressionAttributeNames: { '#expiry': 'expiresAtSeconds' },
+        ExpressionAttributeValues: { ':now': NOW / 1000 },
       });
     });
 

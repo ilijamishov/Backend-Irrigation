@@ -33,7 +33,10 @@ export interface SharingStore {
   /** Expired ones too, until the table removes them. */
   invitationsOf(deviceId: string): Promise<Invitation[]>;
   invitationByCode(codeHash: string): Promise<Invitation | null>;
-  /** False unless the user is the Owner. */
+  /**
+   * False unless the user is the Owner, and the code isn't one of a pending
+   * invitation.
+   */
   addInvitation(ownerId: string, invitation: Invitation): Promise<boolean>;
   /** False unless the user is the Owner and the invitation is still there. */
   removeInvitation(ownerId: string, invitation: Invitation): Promise<boolean>;
@@ -64,6 +67,7 @@ export class DynamoSharingStore implements SharingStore {
   constructor(
     private readonly client: Pick<DynamoDBDocumentClient, 'send'>,
     private readonly tableName: string,
+    private readonly now: () => number = Date.now,
   ) {}
 
   async membersOf(deviceId: string): Promise<Member[]> {
@@ -121,7 +125,11 @@ export class DynamoSharingStore implements SharingStore {
             deviceId: invitation.deviceId,
             ...fields,
           },
-          ConditionExpression: 'attribute_not_exists(PK)',
+          // A code is free again once its invitation has expired, though
+          // DynamoDB removes the item only later.
+          ConditionExpression: 'attribute_not_exists(PK) OR #expiry < :now',
+          ExpressionAttributeNames: { '#expiry': EXPIRY_ATTRIBUTE },
+          ExpressionAttributeValues: { ':now': Math.floor(this.now() / 1000) },
         },
       },
     ]);

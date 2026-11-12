@@ -173,7 +173,7 @@ function setUp(outcome: ClaimOutcome = { result: 'pending' }) {
   };
   const sharing = {
     createInvitation: jest.fn(
-      async (): Promise<InvitationCreation> => ({ result: 'ok', invitation, code: 'ABCDE23456' }),
+      async (): Promise<InvitationCreation> => ({ result: 'ok', invitation, code: '482913' }),
     ),
     listInvitations: jest.fn(
       async (): Promise<InvitationList> => ({ result: 'ok', invitations: [invitation] }),
@@ -696,11 +696,11 @@ describe('ControllersApi', () => {
         invitationId: INVITATION_ID,
         createdAt: '2026-11-12T10:00:00.000Z',
         expiresAt: '2026-11-15T10:00:00.000Z',
-        code: 'ABCDE23456',
+        code: '482913',
       });
       expect(response.body).not.toContain('secret-hash');
       expect(sharing.createInvitation).toHaveBeenCalledWith('alice', DEVICE_ID);
-      expect(logged.join(' ')).not.toContain('ABCDE23456');
+      expect(logged.join(' ')).not.toContain('482913');
     });
 
     it.each<[InvitationCreation['result'], number]>([
@@ -755,7 +755,7 @@ describe('ControllersApi', () => {
       const { api, sharing } = setUp();
 
       const response = await api.handle(
-        event(PREVIEW, { body: JSON.stringify({ code: 'abcde-23456' }) }),
+        event(PREVIEW, { body: JSON.stringify({ code: '482 913' }) }),
       );
 
       expect(response.statusCode).toBe(200);
@@ -763,13 +763,13 @@ describe('ControllersApi', () => {
         name: 'Home Garden',
         expiresAt: '2026-11-15T10:00:00.000Z',
       });
-      expect(sharing.previewInvitation).toHaveBeenCalledWith('abcde-23456');
+      expect(sharing.previewInvitation).toHaveBeenCalledWith('482 913');
     });
 
     it.each([
       ['no code', {}],
-      ['a code too short', { code: 'ABCDE' }],
-      ['a code that is not text', { code: 1234567890 }],
+      ['a code too short', { code: '48291' }],
+      ['a code that is not text', { code: 482913 }],
     ])('refuses %s', async (_name, body) => {
       const { api, sharing } = setUp();
 
@@ -783,23 +783,23 @@ describe('ControllersApi', () => {
       const { api, sharing } = setUp();
 
       const response = await api.handle(
-        event(ACCEPT, { body: JSON.stringify({ code: 'ABCDE23456', userId: 'bob' }) }),
+        event(ACCEPT, { body: JSON.stringify({ code: '482913', userId: 'bob' }) }),
       );
 
       expect(response.statusCode).toBe(200);
       expect(parsed(response)).toEqual({
         controller: { deviceId: DEVICE_ID, name: 'Home Garden', role: 'manager' },
       });
-      expect(sharing.acceptInvitation).toHaveBeenCalledWith('alice', 'google_1', 'ABCDE23456');
+      expect(sharing.acceptInvitation).toHaveBeenCalledWith('alice', 'google_1', '482913');
       expect(logged.join(' ')).toContain(DEVICE_ID);
-      expect(logged.join(' ')).not.toContain('ABCDE23456');
+      expect(logged.join(' ')).not.toContain('482913');
     });
 
     it('needs the username, for the email the Owner sees', async () => {
       const { api } = setUp();
 
       const response = await api.handle(
-        event(ACCEPT, { username: undefined, body: JSON.stringify({ code: 'ABCDE23456' }) }),
+        event(ACCEPT, { username: undefined, body: JSON.stringify({ code: '482913' }) }),
       );
 
       expect(response.statusCode).toBe(400);
@@ -814,7 +814,7 @@ describe('ControllersApi', () => {
       sharing.acceptInvitation.mockResolvedValue({ result } as InvitationAcceptance);
 
       const response = await api.handle(
-        event(ACCEPT, { body: JSON.stringify({ code: 'ABCDE23456' }) }),
+        event(ACCEPT, { body: JSON.stringify({ code: '482913' }) }),
       );
 
       expect(response.statusCode).toBe(status);

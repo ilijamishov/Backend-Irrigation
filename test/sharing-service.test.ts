@@ -1,6 +1,6 @@
 import type { ControllerRecord, Role } from '../lambda/controllers/access-store';
 import {
-  INVITATION_DAYS,
+  INVITATION_LIFETIME_MS,
   isInvitationCode,
   MAX_MANAGERS,
   normalizedCode,
@@ -13,7 +13,7 @@ const OWNER = 'owner-sub';
 const MANAGER = 'manager-sub';
 const STRANGER = 'stranger-sub';
 const NOW = Date.parse('2026-11-12T10:00:00.000Z');
-const CODE = 'ABCDE23456';
+const CODE = '482913';
 
 class FakeSharingStore implements SharingStore {
   members: Member[] = [{ userId: OWNER, role: 'owner' }];
@@ -102,22 +102,21 @@ function setUp() {
   };
 }
 
-const DAY = 86_400_000;
-
 describe('invitation codes', () => {
   it('reads what people type or paste', () => {
-    expect(normalizedCode(' abcde-23456 ')).toBe(CODE);
-    expect(isInvitationCode('abcde-23456')).toBe(true);
+    expect(normalizedCode(' 482 913 ')).toBe(CODE);
+    expect(normalizedCode('482-913')).toBe(CODE);
+    expect(isInvitationCode('482 913')).toBe(true);
   });
 
-  it.each(['ABCDE2345', 'ABCDE234567', 'ABCDE2345O', 'ABCDE23451'])(
+  it.each(['48291', '4829134', '48291A', 'ABCDEF', '482.913'])(
     'refuses %s, which is no code',
     (code) => {
       expect(isInvitationCode(code)).toBe(false);
     },
   );
 
-  it('makes different codes of letters and digits that are easily told apart', async () => {
+  it('makes codes of six digits', async () => {
     const store = new FakeSharingStore();
     // The default code generator.
     const service = new SharingService(
@@ -139,13 +138,13 @@ describe('invitation codes', () => {
       codes.add(created.code);
     }
 
-    expect(codes.size).toBe(5);
+    expect([...codes].every((code) => /^\d{6}$/.test(code))).toBe(true);
   });
 });
 
 describe('SharingService', () => {
   describe('creating an invitation', () => {
-    it('gives the Owner a code that expires after 3 days, and stores only its hash', async () => {
+    it('gives the Owner a code that expires after an hour, and stores only its hash', async () => {
       const { service, store } = setUp();
 
       const created = await service.createInvitation(OWNER, DEVICE_ID);
@@ -153,9 +152,25 @@ describe('SharingService', () => {
       expect(created).toMatchObject({ result: 'ok', code: CODE });
       if (created.result !== 'ok') return;
       expect(created.invitation.expiresAt).toBe(
-        new Date(NOW + INVITATION_DAYS * DAY).toISOString(),
+        new Date(NOW + INVITATION_LIFETIME_MS).toISOString(),
       );
       expect(JSON.stringify(store.invitations)).not.toContain(CODE);
+    });
+
+    it('takes another code when one is in use', async () => {
+      const { service, store } = setUp();
+      let writes = 0;
+      store.addInvitation = async (_ownerId, invitation) => {
+        writes++;
+        if (writes === 1) return false;
+        store.invitations.push(invitation);
+        return true;
+      };
+
+      const created = await service.createInvitation(OWNER, DEVICE_ID);
+
+      expect(created.result).toBe('ok');
+      expect(writes).toBe(2);
     });
 
     it('is only for the Owner', async () => {
@@ -185,7 +200,7 @@ describe('SharingService', () => {
         store.members.push({ userId: `m${i}`, role: 'manager' });
       }
       await service.createInvitation(OWNER, DEVICE_ID);
-      later(INVITATION_DAYS * DAY);
+      later(INVITATION_LIFETIME_MS);
 
       await expect(service.createInvitation(OWNER, DEVICE_ID)).resolves.toMatchObject({
         result: 'ok',
@@ -197,7 +212,7 @@ describe('SharingService', () => {
     it('lists only those still pending', async () => {
       const { service, later } = setUp();
       await service.createInvitation(OWNER, DEVICE_ID);
-      later(INVITATION_DAYS * DAY);
+      later(INVITATION_LIFETIME_MS);
 
       const list = await service.listInvitations(OWNER, DEVICE_ID);
 
@@ -239,10 +254,10 @@ describe('SharingService', () => {
       const { service } = setUp();
       await service.createInvitation(OWNER, DEVICE_ID);
 
-      await expect(service.previewInvitation('abcde-23456')).resolves.toEqual({
+      await expect(service.previewInvitation('482-913')).resolves.toEqual({
         result: 'ok',
         name: 'Home lawn',
-        expiresAt: new Date(NOW + INVITATION_DAYS * DAY).toISOString(),
+        expiresAt: new Date(NOW + INVITATION_LIFETIME_MS).toISOString(),
       });
     });
 
@@ -285,7 +300,7 @@ describe('SharingService', () => {
     it('refuses an expired invitation', async () => {
       const { service, later } = setUp();
       await service.createInvitation(OWNER, DEVICE_ID);
-      later(INVITATION_DAYS * DAY);
+      later(INVITATION_LIFETIME_MS);
 
       await expect(service.acceptInvitation(STRANGER, 'google_123', CODE)).resolves.toEqual({
         result: 'invitation_expired',
