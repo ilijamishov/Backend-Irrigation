@@ -2,6 +2,7 @@ import type { APIGatewayProxyEventV2WithJWTAuthorizer } from 'aws-lambda';
 
 import type {
   AccessStore,
+  Claimed,
   ControllerLocation,
   ControllerRecord,
   NewOwner,
@@ -9,6 +10,13 @@ import type {
 } from '../lambda/controllers/access-store';
 import { ControllersApi } from '../lambda/controllers/api';
 import type { ClaimOutcome } from '../lambda/controllers/claim-service';
+import type {
+  InvitationAcceptance,
+  InvitationCreation,
+  InvitationList,
+  InvitationPreview,
+  PeopleList,
+} from '../lambda/controllers/sharing-service';
 import type { ZoneChange, ZoneList, ZoneRemoval } from '../lambda/controllers/zone-service';
 
 const DEVICE_ID = '1C8F57371AA4';
@@ -34,8 +42,8 @@ class FakeStore implements AccessStore {
     return null;
   }
 
-  async claim(_owner: NewOwner): Promise<ControllerRecord> {
-    return record;
+  async claim(_owner: NewOwner): Promise<Claimed> {
+    return { controller: record, removedUserIds: [] };
   }
 
   async controllersOf(): Promise<UserController[]> {
@@ -80,6 +88,9 @@ function event(
     sub?: unknown;
     deviceId?: string;
     zoneId?: string;
+    invitationId?: string;
+    userId?: string;
+    username?: unknown;
     body?: string;
     isBase64Encoded?: boolean;
   } = {},
@@ -90,10 +101,19 @@ function event(
     pathParameters: {
       deviceId: overrides.deviceId ?? DEVICE_ID,
       ...(overrides.zoneId ? { zoneId: overrides.zoneId } : {}),
+      ...(overrides.invitationId ? { invitationId: overrides.invitationId } : {}),
+      ...(overrides.userId ? { userId: overrides.userId } : {}),
     },
     body: overrides.body,
     isBase64Encoded: overrides.isBase64Encoded ?? false,
-    requestContext: { authorizer: { jwt: { claims: { sub }, scopes: [] } } },
+    requestContext: {
+      authorizer: {
+        jwt: {
+          claims: { sub, username: 'username' in overrides ? overrides.username : 'google_1' },
+          scopes: [],
+        },
+      },
+    },
   } as unknown as APIGatewayProxyEventV2WithJWTAuthorizer;
 }
 
@@ -105,6 +125,16 @@ const ADD_ZONE = 'POST /controllers/{deviceId}/zones';
 const UPDATE_ZONE = 'PUT /controllers/{deviceId}/zones/{zoneId}';
 const REMOVE_ZONE = 'DELETE /controllers/{deviceId}/zones/{zoneId}';
 const ZONE_ID = '3f2b1c9e-0a4d-4e6f-8b7a-1c2d3e4f5a6b';
+const INVITATION_ID = '00000000-0000-4000-8000-000000000001';
+const MANAGER_ID = '0458f4a8-1234-5678-9abc-def012345678';
+const INVITATIONS = 'POST /controllers/{deviceId}/invitations';
+const LIST_INVITATIONS = 'GET /controllers/{deviceId}/invitations';
+const CANCEL_INVITATION = 'DELETE /controllers/{deviceId}/invitations/{invitationId}';
+const PREVIEW = 'POST /invitations/preview';
+const ACCEPT = 'POST /invitations/accept';
+const PEOPLE = 'GET /controllers/{deviceId}/people';
+const REMOVE_PERSON = 'DELETE /controllers/{deviceId}/people/{userId}';
+const LEAVE = 'DELETE /controllers/{deviceId}/access';
 const zone = {
   zoneId: ZONE_ID,
   name: 'Back lawn',
@@ -134,12 +164,63 @@ function setUp(outcome: ClaimOutcome = { result: 'pending' }) {
     update: jest.fn(async (): Promise<ZoneChange> => ({ result: 'ok', zone })),
     remove: jest.fn(async (): Promise<ZoneRemoval> => ({ result: 'ok' })),
   };
+  const invitation = {
+    invitationId: INVITATION_ID,
+    deviceId: DEVICE_ID,
+    codeHash: 'secret-hash',
+    createdAt: '2026-11-12T10:00:00.000Z',
+    expiresAt: '2026-11-15T10:00:00.000Z',
+  };
+  const sharing = {
+    createInvitation: jest.fn(
+      async (): Promise<InvitationCreation> => ({ result: 'ok', invitation, code: 'ABCDE23456' }),
+    ),
+    listInvitations: jest.fn(
+      async (): Promise<InvitationList> => ({ result: 'ok', invitations: [invitation] }),
+    ),
+    cancelInvitation: jest.fn(
+      async (): Promise<{ result: 'ok' | 'not_owner' | 'invitation_not_found' }> => ({
+        result: 'ok',
+      }),
+    ),
+    previewInvitation: jest.fn(
+      async (): Promise<InvitationPreview> => ({
+        result: 'ok',
+        name: 'Home Garden',
+        expiresAt: invitation.expiresAt,
+      }),
+    ),
+    acceptInvitation: jest.fn(
+      async (): Promise<InvitationAcceptance> => ({
+        result: 'ok',
+        controller: { deviceId: DEVICE_ID, name: 'Home Garden', role: 'manager' },
+      }),
+    ),
+    listPeople: jest.fn(
+      async (): Promise<PeopleList> => ({
+        result: 'ok',
+        people: [
+          { userId: MANAGER_ID, role: 'manager', email: 'bob@example.com' },
+          { userId: 'alice', role: 'owner' },
+        ],
+      }),
+    ),
+    removeManager: jest.fn(
+      async (): Promise<{ result: 'ok' | 'not_owner' | 'not_a_manager' }> => ({ result: 'ok' }),
+    ),
+    leave: jest.fn(
+      async (): Promise<{ result: 'ok' | 'owner_cannot_leave' | 'no_access' }> => ({
+        result: 'ok',
+      }),
+    ),
+  };
   return {
     store,
     claim,
     timeZoneAt,
     zones,
-    api: new ControllersApi(store, { claim }, { at: timeZoneAt }, zones),
+    sharing,
+    api: new ControllersApi(store, { claim }, { at: timeZoneAt }, zones, sharing),
   };
 }
 
@@ -601,6 +682,192 @@ describe('ControllersApi', () => {
       const response = await api.handle(event('DELETE /controllers'));
 
       expect(response.statusCode).toBe(404);
+    });
+  });
+
+  describe('sharing', () => {
+    it('creates an invitation, with its code but never its hash', async () => {
+      const { api, sharing } = setUp();
+
+      const response = await api.handle(event(INVITATIONS));
+
+      expect(response.statusCode).toBe(201);
+      expect(parsed(response)).toEqual({
+        invitationId: INVITATION_ID,
+        createdAt: '2026-11-12T10:00:00.000Z',
+        expiresAt: '2026-11-15T10:00:00.000Z',
+        code: 'ABCDE23456',
+      });
+      expect(response.body).not.toContain('secret-hash');
+      expect(sharing.createInvitation).toHaveBeenCalledWith('alice', DEVICE_ID);
+      expect(logged.join(' ')).not.toContain('ABCDE23456');
+    });
+
+    it.each<[InvitationCreation['result'], number]>([
+      ['not_owner', 403],
+      ['limit_reached', 409],
+    ])('answers %s with %i', async (result, status) => {
+      const { api, sharing } = setUp();
+      sharing.createInvitation.mockResolvedValue({ result } as InvitationCreation);
+
+      const response = await api.handle(event(INVITATIONS));
+
+      expect(response.statusCode).toBe(status);
+      expect(parsed(response)).toEqual({ error: result });
+    });
+
+    it('lists the pending invitations without their hashes', async () => {
+      const { api } = setUp();
+
+      const response = await api.handle(event(LIST_INVITATIONS));
+
+      expect(response.statusCode).toBe(200);
+      expect(parsed(response).invitations).toEqual([
+        {
+          invitationId: INVITATION_ID,
+          createdAt: '2026-11-12T10:00:00.000Z',
+          expiresAt: '2026-11-15T10:00:00.000Z',
+        },
+      ]);
+    });
+
+    it('cancels an invitation by its ID', async () => {
+      const { api, sharing } = setUp();
+
+      const response = await api.handle(
+        event(CANCEL_INVITATION, { invitationId: INVITATION_ID }),
+      );
+
+      expect(response.statusCode).toBe(200);
+      expect(sharing.cancelInvitation).toHaveBeenCalledWith('alice', DEVICE_ID, INVITATION_ID);
+    });
+
+    it('refuses an invitation ID that is none', async () => {
+      const { api, sharing } = setUp();
+
+      const response = await api.handle(event(CANCEL_INVITATION, { invitationId: 'nope' }));
+
+      expect(response.statusCode).toBe(400);
+      expect(sharing.cancelInvitation).not.toHaveBeenCalled();
+    });
+
+    it('shows the controller an invitation is for', async () => {
+      const { api, sharing } = setUp();
+
+      const response = await api.handle(
+        event(PREVIEW, { body: JSON.stringify({ code: 'abcde-23456' }) }),
+      );
+
+      expect(response.statusCode).toBe(200);
+      expect(parsed(response)).toEqual({
+        name: 'Home Garden',
+        expiresAt: '2026-11-15T10:00:00.000Z',
+      });
+      expect(sharing.previewInvitation).toHaveBeenCalledWith('abcde-23456');
+    });
+
+    it.each([
+      ['no code', {}],
+      ['a code too short', { code: 'ABCDE' }],
+      ['a code that is not text', { code: 1234567890 }],
+    ])('refuses %s', async (_name, body) => {
+      const { api, sharing } = setUp();
+
+      const response = await api.handle(event(ACCEPT, { body: JSON.stringify(body) }));
+
+      expect(response.statusCode).toBe(400);
+      expect(sharing.acceptInvitation).not.toHaveBeenCalled();
+    });
+
+    it('joins with the user from the token, and logs only the controller', async () => {
+      const { api, sharing } = setUp();
+
+      const response = await api.handle(
+        event(ACCEPT, { body: JSON.stringify({ code: 'ABCDE23456', userId: 'bob' }) }),
+      );
+
+      expect(response.statusCode).toBe(200);
+      expect(parsed(response)).toEqual({
+        controller: { deviceId: DEVICE_ID, name: 'Home Garden', role: 'manager' },
+      });
+      expect(sharing.acceptInvitation).toHaveBeenCalledWith('alice', 'google_1', 'ABCDE23456');
+      expect(logged.join(' ')).toContain(DEVICE_ID);
+      expect(logged.join(' ')).not.toContain('ABCDE23456');
+    });
+
+    it('needs the username, for the email the Owner sees', async () => {
+      const { api } = setUp();
+
+      const response = await api.handle(
+        event(ACCEPT, { username: undefined, body: JSON.stringify({ code: 'ABCDE23456' }) }),
+      );
+
+      expect(response.statusCode).toBe(400);
+    });
+
+    it.each<[InvitationAcceptance['result'], number]>([
+      ['invitation_not_found', 404],
+      ['invitation_expired', 410],
+      ['already_has_access', 409],
+    ])('answers %s with %i', async (result, status) => {
+      const { api, sharing } = setUp();
+      sharing.acceptInvitation.mockResolvedValue({ result } as InvitationAcceptance);
+
+      const response = await api.handle(
+        event(ACCEPT, { body: JSON.stringify({ code: 'ABCDE23456' }) }),
+      );
+
+      expect(response.statusCode).toBe(status);
+      expect(parsed(response)).toEqual({ error: result });
+    });
+
+    it('lists the people of a controller', async () => {
+      const { api } = setUp();
+
+      const response = await api.handle(event(PEOPLE));
+
+      expect(response.statusCode).toBe(200);
+      expect(parsed(response).people).toEqual([
+        { userId: MANAGER_ID, role: 'manager', email: 'bob@example.com' },
+        { userId: 'alice', role: 'owner' },
+      ]);
+    });
+
+    it('removes a Manager', async () => {
+      const { api, sharing } = setUp();
+
+      const response = await api.handle(event(REMOVE_PERSON, { userId: MANAGER_ID }));
+
+      expect(response.statusCode).toBe(200);
+      expect(sharing.removeManager).toHaveBeenCalledWith('alice', DEVICE_ID, MANAGER_ID);
+    });
+
+    it('says when the person is no Manager', async () => {
+      const { api, sharing } = setUp();
+      sharing.removeManager.mockResolvedValue({ result: 'not_a_manager' });
+
+      const response = await api.handle(event(REMOVE_PERSON, { userId: MANAGER_ID }));
+
+      expect(response.statusCode).toBe(404);
+    });
+
+    it('lets a Manager leave', async () => {
+      const { api, sharing } = setUp();
+
+      const response = await api.handle(event(LEAVE));
+
+      expect(response.statusCode).toBe(200);
+      expect(sharing.leave).toHaveBeenCalledWith('alice', DEVICE_ID);
+    });
+
+    it('tells the Owner they can\'t leave', async () => {
+      const { api, sharing } = setUp();
+      sharing.leave.mockResolvedValue({ result: 'owner_cannot_leave' });
+
+      const response = await api.handle(event(LEAVE));
+
+      expect(response.statusCode).toBe(409);
+      expect(parsed(response)).toEqual({ error: 'owner_cannot_leave' });
     });
   });
 });

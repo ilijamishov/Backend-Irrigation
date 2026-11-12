@@ -13,6 +13,8 @@ import { NodejsFunction, OutputFormat } from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import type { Construct } from 'constructs';
 
+import { EXPIRY_ATTRIBUTE } from '../lambda/controllers/connections';
+
 export const DEVICE_POLICY_NAME = 'ESP32IrrigationDevicePolicy';
 export const CLAIM_POLICY_NAME = 'ESP32IrrigationClaimProvisioningPolicy';
 export const TEMPLATE_NAME = 'ESP32IrrigationFleetProvisioning';
@@ -128,6 +130,8 @@ export class ControllersStack extends Stack {
       partitionKey: { name: 'PK', type: dynamodb.AttributeType.STRING },
       sortKey: { name: 'SK', type: dynamodb.AttributeType.STRING },
       billing: dynamodb.Billing.onDemand(),
+      // Invitations and recorded connections remove themselves.
+      timeToLiveAttribute: EXPIRY_ATTRIBUTE,
       globalSecondaryIndexes: [
         {
           indexName: USER_INDEX_NAME,
@@ -151,6 +155,7 @@ export class ControllersStack extends Stack {
         TABLE_NAME: table.tableName,
         USER_INDEX_NAME,
         IOT_DATA_ENDPOINT: props.iotDataEndpoint,
+        USER_POOL_ID: props.userPool.userPoolId,
         GEO_TZ_DATA_PATH: `/var/task/${TIME_ZONE_MAP_FOLDER}`,
       },
       logGroup: new logs.LogGroup(this, 'ControllersApiLogs', {
@@ -188,6 +193,26 @@ export class ControllersStack extends Stack {
       }),
     );
 
+    // Closes the app connections of someone whose access ended.
+    handler.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ['iot:DeleteConnection'],
+        resources: [this.iotArn('client/*')],
+      }),
+    );
+
+    // The email of a new Manager, so the Owner can tell them apart.
+    handler.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ['cognito-idp:AdminGetUser'],
+        // From the ID, which the Auth stack already exports: a new export would
+        // tie the order the two stacks deploy in.
+        resources: [
+          `arn:aws:cognito-idp:${this.region}:${this.account}:userpool/${props.userPool.userPoolId}`,
+        ],
+      }),
+    );
+
     const api = new apigateway.HttpApi(this, 'Api', {
       apiName: 'irrigation-controllers',
       createDefaultStage: false,
@@ -196,7 +221,8 @@ export class ControllersStack extends Stack {
       }),
     });
 
-    // The claim code is too long to guess, so this only limits the cost.
+    // The claim code is too long to guess, and an invitation code can't be
+    // guessed within its 3 days at this rate, so this only limits the cost.
     const stage = new apigateway.HttpStage(this, 'ApiStage', {
       httpApi: api,
       stageName: '$default',
@@ -214,6 +240,14 @@ export class ControllersStack extends Stack {
       [apigateway.HttpMethod.POST, '/controllers/{deviceId}/zones'],
       [apigateway.HttpMethod.PUT, '/controllers/{deviceId}/zones/{zoneId}'],
       [apigateway.HttpMethod.DELETE, '/controllers/{deviceId}/zones/{zoneId}'],
+      [apigateway.HttpMethod.POST, '/controllers/{deviceId}/invitations'],
+      [apigateway.HttpMethod.GET, '/controllers/{deviceId}/invitations'],
+      [apigateway.HttpMethod.DELETE, '/controllers/{deviceId}/invitations/{invitationId}'],
+      [apigateway.HttpMethod.POST, '/invitations/preview'],
+      [apigateway.HttpMethod.POST, '/invitations/accept'],
+      [apigateway.HttpMethod.GET, '/controllers/{deviceId}/people'],
+      [apigateway.HttpMethod.DELETE, '/controllers/{deviceId}/people/{userId}'],
+      [apigateway.HttpMethod.DELETE, '/controllers/{deviceId}/access'],
     ] as const) {
       api.addRoutes({ path: routePath, methods: [method], integration });
     }
@@ -256,6 +290,17 @@ export class ControllersStack extends Stack {
     });
 
     table.grantReadData(handler);
+
+    // Records each connection so it can be closed, and may write nothing else.
+    handler.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ['dynamodb:PutItem'],
+        resources: [table.tableArn],
+        conditions: {
+          'ForAllValues:StringLike': { 'dynamodb:LeadingKeys': ['CONNECTIONS#*'] },
+        },
+      }),
+    );
 
     handler.addPermission('InvokedByIot', {
       principal: new iam.ServicePrincipal('iot.amazonaws.com'),

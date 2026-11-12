@@ -1,3 +1,4 @@
+import { CognitoIdentityProviderClient } from '@aws-sdk/client-cognito-identity-provider';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { IoTDataPlaneClient } from '@aws-sdk/client-iot-data-plane';
 import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
@@ -14,6 +15,10 @@ import {
 } from './access-store';
 import { IotClaimReportSource } from './claim-report';
 import { type ClaimOutcome, ClaimService } from './claim-service';
+import { AccessRevoker, DynamoConnectionRegistry, IotConnectionCloser } from './connections';
+import { CognitoEmailDirectory } from './email-directory';
+import { isInvitationCode, SharingService } from './sharing-service';
+import { DynamoSharingStore, type Invitation, type Member } from './sharing-store';
 import { MapTimeZoneLookup, type TimeZoneLookup } from './time-zones';
 import { type ZoneChange, type ZoneInput, ZoneService } from './zone-service';
 
@@ -23,6 +28,8 @@ const DEVICE_ID = /^[0-9A-F]{12}$/;
 /** 32 bytes in base64url, without padding. */
 const CLAIM_CODE = /^[A-Za-z0-9_-]{43}$/;
 const ZONE_ID = /^[0-9a-f-]{36}$/;
+/** Invitation IDs and Cognito `sub`s are both UUIDs. */
+const UUID = /^[0-9a-f-]{36}$/;
 const MAX_NAME_LENGTH = 40;
 const MAX_DESCRIPTION_LENGTH = 200;
 const FIRST_RELAY = 1;
@@ -45,6 +52,17 @@ export class ControllersApi {
     private readonly claims: Pick<ClaimService, 'claim'>,
     private readonly timeZones: TimeZoneLookup,
     private readonly zones: Pick<ZoneService, 'list' | 'add' | 'update' | 'remove'>,
+    private readonly sharing: Pick<
+      SharingService,
+      | 'createInvitation'
+      | 'listInvitations'
+      | 'cancelInvitation'
+      | 'previewInvitation'
+      | 'acceptInvitation'
+      | 'listPeople'
+      | 'removeManager'
+      | 'leave'
+    >,
   ) {}
 
   async handle(event: APIGatewayProxyEventV2WithJWTAuthorizer): Promise<Response> {
@@ -71,6 +89,22 @@ export class ControllersApi {
           return await this.updateZone(userId, event);
         case 'DELETE /controllers/{deviceId}/zones/{zoneId}':
           return await this.removeZone(userId, event);
+        case 'POST /controllers/{deviceId}/invitations':
+          return await this.createInvitation(userId, event);
+        case 'GET /controllers/{deviceId}/invitations':
+          return await this.listInvitations(userId, event);
+        case 'DELETE /controllers/{deviceId}/invitations/{invitationId}':
+          return await this.cancelInvitation(userId, event);
+        case 'POST /invitations/preview':
+          return await this.previewInvitation(event);
+        case 'POST /invitations/accept':
+          return await this.acceptInvitation(userId, event);
+        case 'GET /controllers/{deviceId}/people':
+          return await this.listPeople(userId, event);
+        case 'DELETE /controllers/{deviceId}/people/{userId}':
+          return await this.removeManager(userId, event);
+        case 'DELETE /controllers/{deviceId}/access':
+          return await this.leave(userId, event);
         default:
           return error(404, 'not_found');
       }
@@ -167,6 +201,109 @@ export class ControllersApi {
     return result === 'ok' ? json(200, {}) : refusal(result);
   }
 
+  /** The code is in the answer only: it is never stored or logged. */
+  private async createInvitation(
+    userId: string,
+    event: APIGatewayProxyEventV2WithJWTAuthorizer,
+  ): Promise<Response> {
+    const deviceId = deviceIdOf(event);
+    if (!deviceId) return error(400, 'invalid_request');
+
+    const created = await this.sharing.createInvitation(userId, deviceId);
+    if (created.result !== 'ok') return sharingRefusal(created.result);
+
+    return json(201, { ...invitationView(created.invitation), code: created.code });
+  }
+
+  private async listInvitations(
+    userId: string,
+    event: APIGatewayProxyEventV2WithJWTAuthorizer,
+  ): Promise<Response> {
+    const deviceId = deviceIdOf(event);
+    if (!deviceId) return error(400, 'invalid_request');
+
+    const list = await this.sharing.listInvitations(userId, deviceId);
+    return list.result === 'ok'
+      ? json(200, { invitations: list.invitations.map(invitationView) })
+      : sharingRefusal(list.result);
+  }
+
+  private async cancelInvitation(
+    userId: string,
+    event: APIGatewayProxyEventV2WithJWTAuthorizer,
+  ): Promise<Response> {
+    const deviceId = deviceIdOf(event);
+    const invitationId = uuidOf(event, 'invitationId');
+    if (!deviceId || !invitationId) return error(400, 'invalid_request');
+
+    const { result } = await this.sharing.cancelInvitation(userId, deviceId, invitationId);
+    return result === 'ok' ? json(200, {}) : sharingRefusal(result);
+  }
+
+  private async previewInvitation(
+    event: APIGatewayProxyEventV2WithJWTAuthorizer,
+  ): Promise<Response> {
+    const code = codeOf(event);
+    if (!code) return error(400, 'invalid_request');
+
+    const preview = await this.sharing.previewInvitation(code);
+    return preview.result === 'ok'
+      ? json(200, { name: preview.name, expiresAt: preview.expiresAt })
+      : sharingRefusal(preview.result);
+  }
+
+  private async acceptInvitation(
+    userId: string,
+    event: APIGatewayProxyEventV2WithJWTAuthorizer,
+  ): Promise<Response> {
+    const code = codeOf(event);
+    const username = event.requestContext.authorizer?.jwt?.claims?.username;
+    if (!code || typeof username !== 'string') return error(400, 'invalid_request');
+
+    const accepted = await this.sharing.acceptInvitation(userId, username, code);
+    if (accepted.result !== 'ok') return sharingRefusal(accepted.result);
+
+    // The device ID only: never the code.
+    console.log(`Invitation to ${accepted.controller.deviceId} accepted.`);
+    return json(200, { controller: accepted.controller });
+  }
+
+  private async listPeople(
+    userId: string,
+    event: APIGatewayProxyEventV2WithJWTAuthorizer,
+  ): Promise<Response> {
+    const deviceId = deviceIdOf(event);
+    if (!deviceId) return error(400, 'invalid_request');
+
+    const list = await this.sharing.listPeople(userId, deviceId);
+    return list.result === 'ok'
+      ? json(200, { people: list.people.map(memberView) })
+      : sharingRefusal(list.result);
+  }
+
+  private async removeManager(
+    userId: string,
+    event: APIGatewayProxyEventV2WithJWTAuthorizer,
+  ): Promise<Response> {
+    const deviceId = deviceIdOf(event);
+    const managerId = uuidOf(event, 'userId');
+    if (!deviceId || !managerId) return error(400, 'invalid_request');
+
+    const { result } = await this.sharing.removeManager(userId, deviceId, managerId);
+    return result === 'ok' ? json(200, {}) : sharingRefusal(result);
+  }
+
+  private async leave(
+    userId: string,
+    event: APIGatewayProxyEventV2WithJWTAuthorizer,
+  ): Promise<Response> {
+    const deviceId = deviceIdOf(event);
+    if (!deviceId) return error(400, 'invalid_request');
+
+    const { result } = await this.sharing.leave(userId, deviceId);
+    return result === 'ok' ? json(200, {}) : sharingRefusal(result);
+  }
+
   /** Never logs the position: it shows where the Owner lives. */
   private async setLocation(
     userId: string,
@@ -203,6 +340,62 @@ function deviceIdOf(event: APIGatewayProxyEventV2WithJWTAuthorizer): string | nu
 function zoneIdOf(event: APIGatewayProxyEventV2WithJWTAuthorizer): string | null {
   const zoneId = event.pathParameters?.zoneId;
   return zoneId && ZONE_ID.test(zoneId) ? zoneId : null;
+}
+
+function uuidOf(
+  event: APIGatewayProxyEventV2WithJWTAuthorizer,
+  name: 'invitationId' | 'userId',
+): string | null {
+  const value = event.pathParameters?.[name];
+  return value && UUID.test(value) ? value : null;
+}
+
+/** In the body, so it never appears in a URL or an access log. */
+function codeOf(event: APIGatewayProxyEventV2WithJWTAuthorizer): string | null {
+  const code = bodyOf(event)?.code;
+  return typeof code === 'string' && isInvitationCode(code) ? code : null;
+}
+
+type SharingRefusal =
+  | 'not_owner'
+  | 'limit_reached'
+  | 'invitation_not_found'
+  | 'invitation_expired'
+  | 'already_has_access'
+  | 'not_a_manager'
+  | 'owner_cannot_leave'
+  | 'no_access';
+
+function sharingRefusal(reason: SharingRefusal): Response {
+  // The same not_owner for a missing controller: it shows nothing to a stranger.
+  const status: Record<SharingRefusal, number> = {
+    not_owner: 403,
+    no_access: 403,
+    limit_reached: 409,
+    already_has_access: 409,
+    owner_cannot_leave: 409,
+    invitation_not_found: 404,
+    not_a_manager: 404,
+    invitation_expired: 410,
+  };
+  return error(status[reason], reason);
+}
+
+/** Without the code's hash, which stays in the backend. */
+function invitationView(invitation: Invitation) {
+  return {
+    invitationId: invitation.invitationId,
+    createdAt: invitation.createdAt,
+    expiresAt: invitation.expiresAt,
+  };
+}
+
+function memberView(member: Member) {
+  return {
+    userId: member.userId,
+    role: member.role,
+    ...(member.email ? { email: member.email } : {}),
+  };
 }
 
 function bodyOf(event: APIGatewayProxyEventV2WithJWTAuthorizer): Record<string, unknown> | null {
@@ -324,25 +517,34 @@ function error(statusCode: number, code: string): Response {
 let configured: ControllersApi | undefined;
 
 function fromEnvironment(environment: NodeJS.ProcessEnv = process.env): ControllersApi {
-  const { TABLE_NAME, USER_INDEX_NAME, IOT_DATA_ENDPOINT } = environment;
-  if (!TABLE_NAME || !USER_INDEX_NAME || !IOT_DATA_ENDPOINT) {
-    throw new Error('TABLE_NAME, USER_INDEX_NAME and IOT_DATA_ENDPOINT are required.');
+  const { TABLE_NAME, USER_INDEX_NAME, IOT_DATA_ENDPOINT, USER_POOL_ID } = environment;
+  if (!TABLE_NAME || !USER_INDEX_NAME || !IOT_DATA_ENDPOINT || !USER_POOL_ID) {
+    throw new Error(
+      'TABLE_NAME, USER_INDEX_NAME, IOT_DATA_ENDPOINT and USER_POOL_ID are required.',
+    );
   }
 
-  const store = new DynamoAccessStore(
-    DynamoDBDocumentClient.from(new DynamoDBClient({})),
-    TABLE_NAME,
-    USER_INDEX_NAME,
+  const documents = DynamoDBDocumentClient.from(new DynamoDBClient({}));
+  const store = new DynamoAccessStore(documents, TABLE_NAME, USER_INDEX_NAME);
+  const iotData = new IoTDataPlaneClient({ endpoint: `https://${IOT_DATA_ENDPOINT}` });
+  const reports = new IotClaimReportSource(iotData);
+  const revoker = new AccessRevoker(
+    new DynamoConnectionRegistry(documents, TABLE_NAME),
+    new IotConnectionCloser(iotData),
   );
-  const reports = new IotClaimReportSource(
-    new IoTDataPlaneClient({ endpoint: `https://${IOT_DATA_ENDPOINT}` }),
+  const sharing = new SharingService(
+    store,
+    new DynamoSharingStore(documents, TABLE_NAME),
+    new CognitoEmailDirectory(new CognitoIdentityProviderClient({}), USER_POOL_ID),
+    revoker,
   );
 
   return new ControllersApi(
     store,
-    new ClaimService(store, reports),
+    new ClaimService(store, reports, revoker),
     new MapTimeZoneLookup(),
     new ZoneService(store),
+    sharing,
   );
 }
 

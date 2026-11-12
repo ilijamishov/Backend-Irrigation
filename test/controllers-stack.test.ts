@@ -199,6 +199,12 @@ describe('ControllersStack', () => {
       });
     });
 
+    it('removes expired invitations and connections by itself', () => {
+      template.hasResourceProperties('AWS::DynamoDB::GlobalTable', {
+        TimeToLiveSpecification: { AttributeName: 'expiresAtSeconds', Enabled: true },
+      });
+    });
+
     it('can list the controllers of a user', () => {
       template.hasResourceProperties('AWS::DynamoDB::GlobalTable', {
         GlobalSecondaryIndexes: [
@@ -221,6 +227,14 @@ describe('ControllersStack', () => {
       'POST /controllers/{deviceId}/zones',
       'PUT /controllers/{deviceId}/zones/{zoneId}',
       'DELETE /controllers/{deviceId}/zones/{zoneId}',
+      'POST /controllers/{deviceId}/invitations',
+      'GET /controllers/{deviceId}/invitations',
+      'DELETE /controllers/{deviceId}/invitations/{invitationId}',
+      'POST /invitations/preview',
+      'POST /invitations/accept',
+      'GET /controllers/{deviceId}/people',
+      'DELETE /controllers/{deviceId}/people/{userId}',
+      'DELETE /controllers/{deviceId}/access',
     ])('needs a token from the app for %s', (routeKey) => {
       template.hasResourceProperties('AWS::ApiGatewayV2::Route', {
         RouteKey: routeKey,
@@ -230,7 +244,7 @@ describe('ControllersStack', () => {
     });
 
     it('has no other routes', () => {
-      template.resourceCountIs('AWS::ApiGatewayV2::Route', 8);
+      template.resourceCountIs('AWS::ApiGatewayV2::Route', 16);
     });
 
     it('packs the time zone map where the Lambda looks for it', () => {
@@ -280,6 +294,30 @@ describe('ControllersStack', () => {
       });
     });
 
+    it('may close app connections, and nothing else of a client', () => {
+      template.hasResourceProperties('AWS::IAM::Policy', {
+        PolicyDocument: {
+          Statement: Match.arrayWith([
+            {
+              Action: 'iot:DeleteConnection',
+              Effect: 'Allow',
+              Resource: `${iot}:client/*`,
+            },
+          ]),
+        },
+      });
+    });
+
+    it('may read a user of the user pool, for a new Manager\'s email', () => {
+      template.hasResourceProperties('AWS::IAM::Policy', {
+        PolicyDocument: {
+          Statement: Match.arrayWith([
+            Match.objectLike({ Action: 'cognito-idp:AdminGetUser', Effect: 'Allow' }),
+          ]),
+        },
+      });
+    });
+
     it('is told where the data lives', () => {
       template.hasResourceProperties('AWS::Lambda::Function', {
         Environment: {
@@ -287,6 +325,7 @@ describe('ControllersStack', () => {
             TABLE_NAME: Match.anyValue(),
             USER_INDEX_NAME: 'byUser',
             IOT_DATA_ENDPOINT: 'example-ats.iot.us-east-1.amazonaws.com',
+            USER_POOL_ID: Match.anyValue(),
           }),
         },
       });
@@ -324,14 +363,28 @@ describe('ControllersStack', () => {
       });
     });
 
-    it('may only read the access table', () => {
+    it('may only read the access table, and record its connections', () => {
       const policies = template.findResources('AWS::IAM::Policy');
       const authorizer = Object.entries(policies).find(([id]) => id.startsWith('IotAuthorizer'));
+      const statements = authorizer?.[1].Properties.PolicyDocument.Statement as {
+        Action: string | string[];
+        Condition?: unknown;
+      }[];
 
-      const actions = JSON.stringify(authorizer?.[1].Properties.PolicyDocument);
+      const actions = JSON.stringify(statements);
       expect(actions).toContain('dynamodb:Query');
-      expect(actions).not.toMatch(/dynamodb:(Put|Update|Delete|BatchWrite)/);
+      expect(actions).not.toMatch(/dynamodb:(Update|Delete|BatchWrite)/);
       expect(actions).not.toContain('iot:');
+
+      const writes = statements.filter((statement) => JSON.stringify(statement).includes('Put'));
+      expect(writes).toEqual([
+        expect.objectContaining({
+          Action: 'dynamodb:PutItem',
+          Condition: {
+            'ForAllValues:StringLike': { 'dynamodb:LeadingKeys': ['CONNECTIONS#*'] },
+          },
+        }),
+      ]);
     });
   });
 

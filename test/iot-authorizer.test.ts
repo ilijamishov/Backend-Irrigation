@@ -8,6 +8,7 @@ import {
 } from '../lambda/controllers/access-policy';
 import { CognitoTokenVerifier } from '../lambda/controllers/cognito-token';
 import {
+  CLIENT_ID_HEADER,
   createAuthorizerHandler,
   TOKEN_HEADER,
   type TokenChecker,
@@ -120,13 +121,21 @@ describe('the authorizer', () => {
   const access = {
     accessOf: jest.fn(async () => [{ deviceId: OWNED, role: 'owner' as const }]),
   };
-  const handler = createAuthorizerHandler(valid, access, builder, () => NOW);
+  const connections = { record: jest.fn(async () => undefined) };
+  const handler = createAuthorizerHandler(valid, access, builder, connections, () => NOW);
 
   const withHeader = (token: string, name = TOKEN_HEADER) => ({
     protocolData: { http: { headers: { [name]: token } } },
   });
 
-  beforeEach(() => access.accessOf.mockClear());
+  const withClientId = (clientId: string) => ({
+    protocolData: { http: { headers: { [TOKEN_HEADER]: 'good', [CLIENT_ID_HEADER]: clientId } } },
+  });
+
+  beforeEach(() => {
+    access.accessOf.mockClear();
+    connections.record.mockClear();
+  });
 
   it('allows a valid token, with the policy of its user', async () => {
     const answer = await handler(withHeader('good'));
@@ -168,6 +177,7 @@ describe('the authorizer', () => {
       valid,
       { accessOf: async () => Promise.reject(new Error('private detail')) },
       builder,
+      connections,
       () => NOW,
     );
 
@@ -196,10 +206,53 @@ describe('the authorizer', () => {
       { verify: async () => ({ userId: USER, expiresAt }) },
       access,
       builder,
+      connections,
       () => NOW,
     );
 
     expect((await bounded(withHeader('good'))).disconnectAfterInSeconds).toBe(seconds);
+  });
+
+  it('lets only the named client ID connect, and records it until the token ends', async () => {
+    const clientId = `${USER}-install-1`;
+
+    const answer = await handler(withClientId(clientId));
+
+    expect(resourcesFor(answer.policyDocuments, 'iot:Connect')).toEqual([
+      `${PREFIX}client/${clientId}`,
+    ]);
+    expect(connections.record).toHaveBeenCalledWith(USER, clientId, NOW + 3600);
+  });
+
+  it.each([
+    ['of another user', 'someone-else-install-1'],
+    ['with characters AWS IoT would refuse', `${USER}-install/1`],
+    ['without an installation ID', `${USER}-`],
+  ])('ignores a client ID %s', async (_name, clientId) => {
+    const answer = await handler(withClientId(clientId));
+
+    expect(answer.isAuthenticated).toBe(true);
+    expect(resourcesFor(answer.policyDocuments, 'iot:Connect')).toEqual([
+      `${PREFIX}client/${USER}-*`,
+    ]);
+    expect(connections.record).not.toHaveBeenCalled();
+  });
+
+  it('refuses when the connection cannot be recorded, because it couldn\'t be closed', async () => {
+    const error = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+    const failing = createAuthorizerHandler(
+      valid,
+      access,
+      builder,
+      { record: async () => Promise.reject(new Error('private detail')) },
+      () => NOW,
+    );
+
+    const answer = await failing(withClientId(`${USER}-install-1`));
+
+    expect(answer.isAuthenticated).toBe(false);
+    expect(error.mock.calls.join(' ')).not.toContain('private detail');
+    error.mockRestore();
   });
 
   it('refreshes the policy as often as AWS IoT allows', async () => {

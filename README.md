@@ -40,7 +40,7 @@ The design is in the app repo's [docs/claiming.md](https://github.com/ilijamisho
 
 **A fully erased controller can't register again** until its old Thing is gone, because its certificate was erased too. Find the certificate, detach it from the Thing and the device policy, deactivate and delete it, then delete the Thing. The same applies if a controller never received AWS's answer to its registration. A factory reset keeps the certificate, so it doesn't need this.
 
-**The API** lets the app claim a controller, list a user's controllers, name them, save where they are and manage their zones. It needs a Cognito access token from the app client, and the user is always taken from that token.
+**The API** lets the app claim a controller, list a user's controllers, name them, save where they are, manage their zones, and share them with Managers. It needs a Cognito access token from the app client, and the user is always taken from that token.
 
 | Call | Purpose |
 |---|---|
@@ -52,6 +52,14 @@ The design is in the app repo's [docs/claiming.md](https://github.com/ilijamisho
 | `POST /controllers/{deviceId}/zones` | Adds a zone on a relay, for its Owner only |
 | `PUT /controllers/{deviceId}/zones/{zoneId}` | Changes a zone, for its Owner only |
 | `DELETE /controllers/{deviceId}/zones/{zoneId}` | Deletes a zone, for its Owner only |
+| `POST /controllers/{deviceId}/invitations` | Creates an invitation and answers with its code, once, for its Owner only |
+| `GET /controllers/{deviceId}/invitations` | The pending invitations, without codes, for its Owner only |
+| `DELETE /controllers/{deviceId}/invitations/{invitationId}` | Cancels an invitation, for its Owner only |
+| `POST /invitations/preview` | The controller an invitation code is for, before joining |
+| `POST /invitations/accept` | Joins as a Manager with an invitation code |
+| `GET /controllers/{deviceId}/people` | The Owner and Managers, with each Manager's email, for its Owner only |
+| `DELETE /controllers/{deviceId}/people/{userId}` | Removes a Manager, for its Owner only |
+| `DELETE /controllers/{deviceId}/access` | A Manager leaves |
 
 The rules and answers are in [docs/claiming.md](https://github.com/ilijamishov/Mobile-Irrigation/blob/main/docs/claiming.md) §4 and §5, and for zones in [docs/zones.md](https://github.com/ilijamishov/Mobile-Irrigation/blob/main/docs/zones.md). A zone here is a named area connected to a relay; the firmware calls a relay a "zone". Access is stored in the DynamoDB table `irrigation-access`, which has deletion protection and point-in-time recovery, and is kept if the stack is deleted. The claim handler reads each controller's report as a retained AWS IoT message and stores no codes.
 
@@ -65,6 +73,10 @@ python scripts/generate-posix-time-zones.py
 ```
 
 **The app authorizer** decides what each app connection may do in AWS IoT. The app connects over WebSockets on port 443, with the authorizer's name in the header `x-amz-customauthorizer-name` and its Cognito access token in `x-irrigation-token`. A Lambda checks the token and builds a policy from the user's roles: both roles receive everything of their controllers and may send `command` and `schedule`, only the Owner may send `config`, and nobody may retain a message. The connection ends when the token expires, and the policy is refreshed every 5 minutes, so a role change reaches an open connection within minutes.
+
+**Sharing** follows the app repo's [docs/user-roles.md](https://github.com/ilijamishov/Mobile-Irrigation/blob/main/docs/user-roles.md) §6. An invitation is a code of ten letters and digits, valid once for 3 days; only its SHA-256 hash is stored, and it travels only in request bodies, never in a URL or a log. A controller has at most 10 Managers and pending invitations together. When a Manager joins, the API reads their email from Cognito (`AdminGetUser`) so the Owner can tell Managers apart.
+
+**Access ends at once** when a Manager is removed or leaves, and for the previous Owner and Managers when someone claims a controller after a factory reset (user-roles.md §9.5). The app names its MQTT client ID in the header `x-irrigation-client-id`; the authorizer then lets only that client ID connect and records it (`CONNECTIONS#<sub>` items, removed by DynamoDB's time-to-live when the connection would end anyway). The API closes each recorded connection with `DeleteConnection` after changing the role, and the app connects again with its new access. The authorizer may write nothing but those records. A connection without the header, from an older app, is still allowed and changes at the next policy refresh. **Install the new app before deploying this**, so every connection names its client ID.
 
 Token signing is off, because an app can't keep a signing key secret, so anyone can make AWS IoT call this Lambda. A bad token is refused before anything else is read.
 

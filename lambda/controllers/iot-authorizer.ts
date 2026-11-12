@@ -4,9 +4,13 @@ import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import { DynamoAccessStore } from './access-store';
 import { AccessPolicyBuilder, type ControllerAccess, type PolicyDocument } from './access-policy';
 import { CognitoTokenVerifier, type TokenIdentity } from './cognito-token';
+import { type ConnectionRegistry, DynamoConnectionRegistry } from './connections';
 
 /** The header the app sends its Cognito access token in. */
 export const TOKEN_HEADER = 'x-irrigation-token';
+/** The header the app names its MQTT client ID in: `<sub>-<installation ID>`. */
+export const CLIENT_ID_HEADER = 'x-irrigation-client-id';
+const INSTALLATION_ID = /^[A-Za-z0-9-]{1,64}$/;
 
 /** AWS IoT's limits, in seconds. */
 const MIN_CONNECTION_TIME = 300;
@@ -63,6 +67,7 @@ export function createAuthorizerHandler(
   tokens: TokenChecker,
   access: AccessReader,
   policies: AccessPolicyBuilder,
+  connections: Pick<ConnectionRegistry, 'record'>,
   now: () => number = () => Date.now() / 1000,
 ) {
   return async (event: AuthorizerRequest): Promise<AuthorizerResponse> => {
@@ -73,15 +78,23 @@ export function createAuthorizerHandler(
     if (!identity) return REFUSED;
 
     try {
-      const controllers = await access.accessOf(identity.userId);
+      const clientId = clientIdOf(event, identity.userId);
+      // The connection ends with the token: the app reconnects with a new one.
+      const connectionTime = clamp(identity.expiresAt - now());
+      const [controllers] = await Promise.all([
+        access.accessOf(identity.userId),
+        // So a change of access can close it (docs/claiming.md §7).
+        clientId
+          ? connections.record(identity.userId, clientId, now() + connectionTime)
+          : Promise.resolve(),
+      ]);
 
       return {
         isAuthenticated: true,
         // Letters and digits only, by AWS IoT's rule.
         principalId: identity.userId.replace(/[^a-zA-Z0-9]/g, '').slice(0, 128),
-        policyDocuments: policies.build(identity.userId, controllers),
-        // The connection ends with the token: the app reconnects with a new one.
-        disconnectAfterInSeconds: clamp(identity.expiresAt - now()),
+        policyDocuments: policies.build(identity.userId, controllers, clientId),
+        disconnectAfterInSeconds: connectionTime,
         refreshAfterInSeconds: POLICY_REFRESH_TIME,
       };
     } catch (error) {
@@ -94,10 +107,26 @@ export function createAuthorizerHandler(
 }
 
 function tokenOf(event: AuthorizerRequest): string | undefined {
-  if (event.token) return event.token;
+  return event.token || headerOf(event, TOKEN_HEADER);
+}
 
+/**
+ * The client ID the app names, if it is one of this user's. `null` without
+ * one, as from an older app: the connection is then allowed as before, but a
+ * change of access reaches it only at the next policy refresh.
+ */
+function clientIdOf(event: AuthorizerRequest, userId: string): string | null {
+  const clientId = headerOf(event, CLIENT_ID_HEADER);
+  const prefix = `${userId}-`;
+
+  return clientId?.startsWith(prefix) && INSTALLATION_ID.test(clientId.slice(prefix.length))
+    ? clientId
+    : null;
+}
+
+function headerOf(event: AuthorizerRequest, wanted: string): string | undefined {
   const headers = event.protocolData?.http?.headers ?? {};
-  const name = Object.keys(headers).find((key) => key.toLowerCase() === TOKEN_HEADER);
+  const name = Object.keys(headers).find((key) => key.toLowerCase() === wanted);
 
   return name ? headers[name] : undefined;
 }
@@ -123,18 +152,17 @@ function fromEnvironment(environment: NodeJS.ProcessEnv = process.env) {
     throw new Error('The authorizer is missing its configuration.');
   }
 
+  const documents = DynamoDBDocumentClient.from(new DynamoDBClient({}));
+
   return createAuthorizerHandler(
     new CognitoTokenVerifier({
       region: AWS_REGION,
       userPoolId: USER_POOL_ID,
       appClientId: APP_CLIENT_ID,
     }),
-    new DynamoAccessStore(
-      DynamoDBDocumentClient.from(new DynamoDBClient({})),
-      TABLE_NAME,
-      USER_INDEX_NAME,
-    ),
+    new DynamoAccessStore(documents, TABLE_NAME, USER_INDEX_NAME),
     new AccessPolicyBuilder(IOT_ARN_PREFIX),
+    new DynamoConnectionRegistry(documents, TABLE_NAME),
   );
 }
 

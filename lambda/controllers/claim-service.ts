@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 
 import { type AccessStore, ClaimConflictError, type ControllerRecord } from './access-store';
 import type { ClaimReportSource } from './claim-report';
+import type { Revoker } from './sharing-service';
 
 /** How long a controller's report can be claimed, from when it reached the broker. */
 export const CLAIM_REPORT_LIFETIME_MS = 7 * 24 * 60 * 60 * 1000;
@@ -19,6 +20,7 @@ export class ClaimService {
   constructor(
     private readonly store: AccessStore,
     private readonly reports: ClaimReportSource,
+    private readonly revoker: Revoker,
     private readonly now: () => number = Date.now,
   ) {}
 
@@ -60,7 +62,7 @@ export class ClaimService {
         : { result: 'already_owned' };
     }
 
-    const controller = await this.store.claim({
+    const { controller, removedUserIds } = await this.store.claim({
       deviceId,
       userId,
       name: defaultControllerName(deviceId),
@@ -69,7 +71,12 @@ export class ClaimService {
       previous: current,
     });
 
-    await this.clearReport(deviceId);
+    // After a factory reset, everyone else's access ends at once, not at
+    // their next policy refresh (docs/user-roles.md §9.5).
+    await Promise.all([
+      this.clearReport(deviceId),
+      ...removedUserIds.map((removed) => this.revoker.revoke(removed)),
+    ]);
 
     return { result: 'claimed', controller };
   }

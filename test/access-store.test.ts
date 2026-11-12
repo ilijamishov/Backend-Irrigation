@@ -86,13 +86,16 @@ describe('DynamoAccessStore', () => {
     it('writes the controller and its Owner together, only if nobody got there first', async () => {
       const client = fakeClient();
 
-      const record = await store(client).claim(newOwner());
+      const claimed = await store(client).claim(newOwner());
 
-      expect(record).toEqual({
-        deviceId: DEVICE_ID,
-        name: 'Controller 1AA4',
-        ownerId: 'alice',
-        lastClaimHash: 'hash-new',
+      expect(claimed).toEqual({
+        controller: {
+          deviceId: DEVICE_ID,
+          name: 'Controller 1AA4',
+          ownerId: 'alice',
+          lastClaimHash: 'hash-new',
+        },
+        removedUserIds: [],
       });
 
       const [meta, user, ...rest] = transactionOf(client.sent);
@@ -155,6 +158,14 @@ describe('DynamoAccessStore', () => {
       expect(deleted).toEqual(['USER#bob', 'USER#carol', 'ZONE#1']);
     });
 
+    it('names everyone whose access it ended, so their connections can close', async () => {
+      const client = fakeClient(new Map([[QueryCommand, [items]]]));
+
+      const claimed = await store(client).claim(newOwner(previous));
+
+      expect(claimed.removedUserIds).toEqual(['bob', 'carol']);
+    });
+
     it('only goes ahead if the controller is as it was read', async () => {
       const client = fakeClient(new Map([[QueryCommand, [items]]]));
 
@@ -185,6 +196,13 @@ describe('DynamoAccessStore', () => {
         .map((item) => (item as unknown as { Delete: { Key: { SK: string } } }).Delete.Key.SK);
       // DynamoDB refuses a transaction with two operations on one item.
       expect(deleted).toEqual(['USER#bob']);
+      // The Owner keeps their access, so their connections stay open.
+      const claimed = await store(
+        fakeClient(
+          new Map([[QueryCommand, [{ Items: [{ SK: 'META' }, { SK: 'USER#alice' }] }]]]),
+        ),
+      ).claim(newOwner({ ...previous, ownerId: 'alice' }));
+      expect(claimed.removedUserIds).toEqual([]);
     });
 
     it('reads every page of items', async () => {

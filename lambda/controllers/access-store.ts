@@ -69,6 +69,13 @@ export interface NewOwner {
   readonly previous: ControllerRecord | null;
 }
 
+/** A claim's result: the controller, and whose access it ended. */
+export interface Claimed {
+  readonly controller: ControllerRecord;
+  /** The previous Owner and Managers, except the new Owner. */
+  readonly removedUserIds: string[];
+}
+
 /** The zones changed between reading them and saving this change. */
 export class ZoneConflictError extends Error {
   constructor() {
@@ -89,7 +96,7 @@ export class ClaimConflictError extends Error {
 export interface AccessStore {
   find(deviceId: string): Promise<ControllerRecord | null>;
   /** Makes the user the sole Owner, or throws [ClaimConflictError]. */
-  claim(owner: NewOwner): Promise<ControllerRecord>;
+  claim(owner: NewOwner): Promise<Claimed>;
   controllersOf(userId: string): Promise<UserController[]>;
   /** Only which controllers and roles, without reading their names. */
   accessOf(userId: string): Promise<{ deviceId: string; role: Role }[]>;
@@ -125,6 +132,7 @@ export interface AccessStore {
 }
 
 const META = 'META';
+const USER_PREFIX = 'USER#';
 const ZONE_PREFIX = 'ZONE#';
 
 /** One item per controller, and one per user with access to it. */
@@ -146,7 +154,7 @@ export class DynamoAccessStore implements AccessStore {
     return item ? recordOf(deviceId, item) : null;
   }
 
-  async claim(owner: NewOwner): Promise<ControllerRecord> {
+  async claim(owner: NewOwner): Promise<Claimed> {
     const userItem = userKey(owner.userId);
     const others = owner.previous
       ? (await this.itemsOf(owner.deviceId)).filter((sk) => sk !== META && sk !== userItem)
@@ -199,10 +207,15 @@ export class DynamoAccessStore implements AccessStore {
     }
 
     return {
-      deviceId: owner.deviceId,
-      name: owner.name,
-      ownerId: owner.userId,
-      lastClaimHash: owner.codeHash,
+      controller: {
+        deviceId: owner.deviceId,
+        name: owner.name,
+        ownerId: owner.userId,
+        lastClaimHash: owner.codeHash,
+      },
+      removedUserIds: others
+        .filter((sk) => sk.startsWith(USER_PREFIX))
+        .map((sk) => sk.slice(USER_PREFIX.length)),
     };
   }
 
@@ -487,7 +500,7 @@ function controllerKey(deviceId: string): string {
 }
 
 function userKey(userId: string): string {
-  return `USER#${userId}`;
+  return `${USER_PREFIX}${userId}`;
 }
 
 function deviceIdOf(controllerKeyValue: string): string {

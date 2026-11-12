@@ -39,15 +39,21 @@ export class AccessPolicyBuilder {
    * size. A controller that doesn't fit is left out rather than the whole
    * answer failing: the limit is far above what one user has.
    */
-  build(userId: string, controllers: readonly ControllerAccess[]): PolicyDocument[] {
+  build(
+    userId: string,
+    controllers: readonly ControllerAccess[],
+    clientId: string | null = null,
+  ): PolicyDocument[] {
     const documents: PolicyDocument[] = [
       this.document([
         {
           Effect: 'Allow',
           Action: 'iot:Connect',
           // The app adds an ID per installation, so phones don't push each
-          // other off. AWS IoT allows one connection per client ID.
-          Resource: `${this.arnPrefix}client/${userId}-*`,
+          // other off. AWS IoT allows one connection per client ID. When the
+          // app names its client ID, only that one may connect, because it is
+          // the one the backend can close.
+          Resource: `${this.arnPrefix}client/${clientId ?? `${userId}-*`}`,
         },
       ]),
     ];

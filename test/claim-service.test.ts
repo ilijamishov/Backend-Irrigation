@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 
 import {
   type AccessStore,
+  type Claimed,
   ClaimConflictError,
   type ControllerRecord,
   type NewOwner,
@@ -23,6 +24,8 @@ const OTHER_HASH = 'f'.repeat(64);
 class FakeStore implements AccessStore {
   claims: NewOwner[] = [];
   conflicts = 0;
+  /** Whose access a reset claim ends. */
+  previousUsers: string[] = [];
 
   constructor(public current: ControllerRecord | null = null) {}
 
@@ -30,7 +33,7 @@ class FakeStore implements AccessStore {
     return this.current;
   }
 
-  async claim(owner: NewOwner): Promise<ControllerRecord> {
+  async claim(owner: NewOwner): Promise<Claimed> {
     if (this.conflicts > 0) {
       this.conflicts -= 1;
       throw new ClaimConflictError();
@@ -42,7 +45,10 @@ class FakeStore implements AccessStore {
       ownerId: owner.userId,
       lastClaimHash: owner.codeHash,
     };
-    return this.current;
+    return {
+      controller: this.current,
+      removedUserIds: this.previousUsers.filter((user) => user !== owner.userId),
+    };
   }
 
   async controllersOf(): Promise<UserController[]> {
@@ -108,7 +114,14 @@ const owned = (ownerId: string, lastClaimHash = OTHER_HASH): ControllerRecord =>
 function setUp(current: ControllerRecord | null, latest: ClaimReport | null) {
   const store = new FakeStore(current);
   const reports = new FakeReports(latest);
-  return { store, reports, service: new ClaimService(store, reports, () => NOW) };
+  const revoked: string[] = [];
+  const revoker = { revoke: async (userId: string) => void revoked.push(userId) };
+  return {
+    store,
+    reports,
+    revoked,
+    service: new ClaimService(store, reports, revoker, () => NOW),
+  };
 }
 
 describe('ClaimService', () => {
@@ -261,6 +274,23 @@ describe('ClaimService', () => {
       });
       expect(store.claims[0].previous).toEqual(previous);
       expect(store.current?.ownerId).toBe('alice');
+    });
+
+    it('closes the connections of everyone it removed', async () => {
+      const { service, store, revoked } = setUp(owned('bob'), report({ reset: true }));
+      store.previousUsers = ['bob', 'carol'];
+
+      await service.claim('alice', DEVICE_ID, CODE);
+
+      expect(revoked).toEqual(['bob', 'carol']);
+    });
+
+    it('closes no connections when nobody lost access', async () => {
+      const { service, revoked } = setUp(null, report({ reset: false }));
+
+      await service.claim('alice', DEVICE_ID, CODE);
+
+      expect(revoked).toEqual([]);
     });
 
     it('is a clean start for its own Owner too', async () => {
