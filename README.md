@@ -49,6 +49,7 @@ The design is in the app repo's [docs/claiming.md](https://github.com/ilijamisho
 
 | Call | Purpose |
 |---|---|
+| `GET /version` | The deployed backend's version, for the app's About screen: the short git commit the stacks were built from, with `-dirty` if the working tree had uncommitted changes, or `unknown` |
 | `GET /controllers` | The user's controllers, with name and role |
 | `POST /controllers/{deviceId}/claim` | Claims a controller with its one-time code |
 | `PUT /controllers/{deviceId}/name` | Names a controller, for its Owner only |

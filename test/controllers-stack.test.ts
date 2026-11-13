@@ -34,6 +34,7 @@ function synth(importPhase: boolean): Template {
       env,
       provisioningRoleArn,
       importPhase,
+      backendVersion: '7bf65f8',
       iotDataEndpoint: 'example-ats.iot.us-east-1.amazonaws.com',
       userPool: auth.userPool,
       appClient: auth.appClient,
@@ -338,6 +339,7 @@ describe('ControllersStack', () => {
 
   describe('the API', () => {
     it.each([
+      'GET /version',
       'GET /controllers',
       'POST /controllers/{deviceId}/claim',
       'PUT /controllers/{deviceId}/name',
@@ -366,7 +368,7 @@ describe('ControllersStack', () => {
     });
 
     it('has no other routes', () => {
-      template.resourceCountIs('AWS::ApiGatewayV2::Route', 19);
+      template.resourceCountIs('AWS::ApiGatewayV2::Route', 20);
     });
 
     it('packs the time zone map where the Lambda looks for it', () => {
@@ -451,6 +453,7 @@ describe('ControllersStack', () => {
             USER_INDEX_NAME: 'byUser',
             IOT_DATA_ENDPOINT: 'example-ats.iot.us-east-1.amazonaws.com',
             USER_POOL_ID: Match.anyValue(),
+            BACKEND_VERSION: '7bf65f8',
           }),
         },
       });

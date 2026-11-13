@@ -66,6 +66,8 @@ export class ControllersApi {
       | 'leave'
     >,
     private readonly ownership: Pick<OwnershipService, 'transfer' | 'release' | 'deleteAccount'>,
+    /** The deployed backend's version: the git commit it was built from. */
+    private readonly backendVersion: string,
   ) {}
 
   async handle(event: APIGatewayProxyEventV2WithJWTAuthorizer): Promise<Response> {
@@ -76,6 +78,8 @@ export class ControllersApi {
 
     try {
       switch (event.routeKey) {
+        case 'GET /version':
+          return json(200, { version: this.backendVersion });
         case 'GET /controllers':
           return json(200, { controllers: await this.store.controllersOf(userId) });
         case 'POST /controllers/{deviceId}/claim':
@@ -606,6 +610,7 @@ function fromEnvironment(environment: NodeJS.ProcessEnv = process.env): Controll
     new ZoneService(store),
     sharing,
     ownership,
+    process.env.BACKEND_VERSION || 'unknown',
   );
 }
 

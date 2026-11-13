@@ -53,6 +53,8 @@ export interface ControllersStackProps extends StackProps {
    * following deploy never applies the difference.
    */
   readonly importPhase?: boolean;
+  /** What `GET /version` answers: the commit the stacks were built from. */
+  readonly backendVersion?: string;
 }
 
 /**
@@ -218,6 +220,7 @@ export class ControllersStack extends Stack {
         IOT_DATA_ENDPOINT: props.iotDataEndpoint,
         USER_POOL_ID: props.userPool.userPoolId,
         GEO_TZ_DATA_PATH: `/var/task/${TIME_ZONE_MAP_FOLDER}`,
+        BACKEND_VERSION: props.backendVersion ?? 'unknown',
       },
       logGroup: new logs.LogGroup(this, 'ControllersApiLogs', {
         retention: logs.RetentionDays.ONE_MONTH,
@@ -295,6 +298,7 @@ export class ControllersStack extends Stack {
 
     const integration = new HttpLambdaIntegration('ControllersApiIntegration', handler);
     for (const [method, routePath] of [
+      [apigateway.HttpMethod.GET, '/version'],
       [apigateway.HttpMethod.GET, '/controllers'],
       [apigateway.HttpMethod.POST, '/controllers/{deviceId}/claim'],
       [apigateway.HttpMethod.PUT, '/controllers/{deviceId}/name'],

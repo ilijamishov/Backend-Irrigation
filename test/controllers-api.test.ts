@@ -227,7 +227,15 @@ function setUp(outcome: ClaimOutcome = { result: 'pending' }) {
     zones,
     sharing,
     ownership,
-    api: new ControllersApi(store, { claim }, { at: timeZoneAt }, zones, sharing, ownership),
+    api: new ControllersApi(
+      store,
+      { claim },
+      { at: timeZoneAt },
+      zones,
+      sharing,
+      ownership,
+      '7bf65f8',
+    ),
   };
 }
 
@@ -267,6 +275,25 @@ describe('ControllersApi', () => {
       await api.handle(event(CLAIM, { sub: 'alice', body: JSON.stringify({ code: CODE, userId: 'bob' }) }));
 
       expect(claim).toHaveBeenCalledWith('alice', DEVICE_ID, Buffer.alloc(32, 7));
+    });
+  });
+
+  describe('GET /version', () => {
+    it('answers with the version of the deployed backend', async () => {
+      const { api } = setUp();
+
+      const response = await api.handle(event('GET /version'));
+
+      expect(response.statusCode).toBe(200);
+      expect(parsed(response)).toEqual({ version: '7bf65f8' });
+    });
+
+    it('needs a signed-in user like every other call', async () => {
+      const { api } = setUp();
+
+      const response = await api.handle(event('GET /version', { sub: undefined }));
+
+      expect(response.statusCode).toBe(401);
     });
   });
 

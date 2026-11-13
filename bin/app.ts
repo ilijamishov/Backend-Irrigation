@@ -1,7 +1,10 @@
 #!/usr/bin/env node
+import * as path from 'node:path';
+
 import { App } from 'aws-cdk-lib';
 
 import { AuthStack } from '../lib/auth-stack';
+import { BackendVersion, ProcessGit } from '../lib/backend-version';
 import { CONTROLLER_GROUP_NAME, ControllersStack } from '../lib/controllers-stack';
 import { FirmwareStack } from '../lib/firmware-stack';
 import { GithubDeployStack } from '../lib/github-deploy-stack';
@@ -39,6 +42,7 @@ new ControllersStack(app, 'Irrigation-Controllers', {
   appClient: auth.appClient,
   // Only for the one-time `cdk import`, see the README.
   importPhase: app.node.tryGetContext('controllersImportPhase') === 'true',
+  backendVersion: new BackendVersion(new ProcessGit(path.join(__dirname, '..'))).describe(),
 });
 
 new GithubDeployStack(app, 'Irrigation-GithubDeploy', {
