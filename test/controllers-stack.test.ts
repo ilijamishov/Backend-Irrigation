@@ -7,6 +7,7 @@ import { Match, Template } from 'aws-cdk-lib/assertions';
 import { AuthStack } from '../lib/auth-stack';
 import {
   ACCESS_TABLE_NAME,
+  AUTHORIZER_CONCURRENCY,
   AUTHORIZER_NAME,
   CLAIM_POLICY_NAME,
   CONTROLLER_GROUP_NAME,
@@ -489,6 +490,18 @@ describe('ControllersStack', () => {
           }),
         },
       });
+    });
+
+    it('has its own cap, so a flood of connection attempts leaves the rest alone', () => {
+      template.hasResourceProperties('AWS::Lambda::Function', {
+        Timeout: 5,
+        ReservedConcurrentExecutions: AUTHORIZER_CONCURRENCY,
+      });
+      // Only the authorizer: the others share what is left.
+      const capped = template.findResources('AWS::Lambda::Function', {
+        Properties: { ReservedConcurrentExecutions: Match.anyValue() },
+      });
+      expect(Object.keys(capped)).toEqual([expect.stringMatching(/^IotAuthorizer/)]);
     });
 
     it('may only read the access table, and record its connections', () => {

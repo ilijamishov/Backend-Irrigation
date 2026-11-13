@@ -110,6 +110,5 @@ The [README](../README.md#first-time-setup) has the first-time steps: bootstrapp
 
 ## Before a public release
 
-- Ask AWS to raise the account's Lambda limit, then cap the authorizer ([the app's backlog](https://github.com/ilijamishov/Mobile-Irrigation/blob/main/docs/BACKLOG.md)).
 - Consider a separate environment, because today a mistake reaches every user at once.
 - Consider having the workflow deploy `Irrigation-Controllers` as well.

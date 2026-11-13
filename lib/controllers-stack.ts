@@ -28,6 +28,8 @@ export const CLAIM_POLICY_NAME = 'ESP32IrrigationClaimProvisioningPolicy';
 export const TEMPLATE_NAME = 'ESP32IrrigationFleetProvisioning';
 export const ACCESS_TABLE_NAME = 'irrigation-access';
 export const AUTHORIZER_NAME = 'irrigation-app';
+/** How many app connection checks may run at once: far more than needed. */
+export const AUTHORIZER_CONCURRENCY = 50;
 /** Every registered controller; firmware updates are sent to this group. */
 export const CONTROLLER_GROUP_NAME = 'irrigation-controllers';
 /** Where the time zone map is in the API's Lambda package. */
@@ -338,6 +340,10 @@ export class ControllersStack extends Stack {
       // AWS IoT waits 5 seconds, also on the first call after a quiet time.
       memorySize: 512,
       timeout: Duration.seconds(5),
+      // Anyone can make AWS IoT call it (token signing is off). The cap keeps a
+      // flood of connection attempts from using up what sign-in and the API
+      // need, and also keeps this much for the authorizer itself.
+      reservedConcurrentExecutions: AUTHORIZER_CONCURRENCY,
       environment: {
         USER_POOL_ID: props.userPool.userPoolId,
         APP_CLIENT_ID: props.appClient.userPoolClientId,

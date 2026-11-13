@@ -87,7 +87,7 @@ python scripts/generate-posix-time-zones.py
 
 **Access ends at once** when a Manager is removed or leaves, for everyone on a released controller, for the previous Owner after a transfer, for a deleted account, and for the previous Owner and Managers when someone claims a controller after a factory reset (user-roles.md §9.5). The app names its MQTT client ID in the header `x-irrigation-client-id`; the authorizer then lets only that client ID connect and records it (`CONNECTIONS#<sub>` items, removed by DynamoDB's time-to-live when the connection would end anyway). The API closes each recorded connection with `DeleteConnection` after changing the role, and the app connects again with its new access. The authorizer may write nothing but those records. A connection without the header, from an older app, is still allowed and changes at the next policy refresh. **Install the new app before deploying this**, so every connection names its client ID.
 
-Token signing is off, because an app can't keep a signing key secret, so anyone can make AWS IoT call this Lambda. A bad token is refused before anything else is read.
+Token signing is off, because an app can't keep a signing key secret, so anyone can make AWS IoT call this Lambda. A bad token is refused before anything else is read. Its reserved concurrency of 50 (`AUTHORIZER_CONCURRENCY`) caps it, so a flood of connection attempts can't use up the account's Lambda capacity (1,000 at once, raised from 10 on 2026-11-13) that sign-in and the API need.
 
 Outputs: `IotAuthorizerName`, which the app needs, and `IotAuthorizerFunction`.
 
