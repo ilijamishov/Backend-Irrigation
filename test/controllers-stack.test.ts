@@ -101,14 +101,17 @@ describe('ControllersStack', () => {
     expect(JSON.stringify(policyNamed(template, CLAIM_POLICY_NAME))).not.toContain('esp32-irrigation');
   });
 
-  it('lets a controller connect only as itself, with its certificate and Last Will', () => {
+  it('lets a controller connect only as itself, with its certificate', () => {
     const [connect] = policyNamed(template, DEVICE_POLICY_NAME).Statement;
 
     expect(connect.Resource).toBe(`${iot}:client/${thing}`);
-    expect(connect.Condition.Bool['iot:Connection.Thing.IsAttached']).toBe('true');
-    expect(connect.Condition['ForAllValues:StringEquals']['iot:ConnectAttributes']).toEqual([
-      'LastWill',
-    ]);
+    expect(connect.Condition).toEqual({ Bool: { 'iot:Connection.Thing.IsAttached': 'true' } });
+  });
+
+  it('puts no condition on connect attributes, which closed connections every few minutes', () => {
+    expect(JSON.stringify(policyNamed(template, DEVICE_POLICY_NAME))).not.toContain(
+      'iot:ConnectAttributes',
+    );
   });
 
   it('lets a controller reach only its own topics', () => {

@@ -100,6 +100,7 @@ Revert the commit, then deploy again as above. There is no separate rollback ste
 - **The table and users stay.** The table, the user pool and the AWS IoT resources are kept even if a stack is deleted, so a code rollback doesn't lose them.
 - **Data written by the newer version stays too,** so check that the older code can read it.
 - **AWS IoT keeps at most 5 versions of a policy.** If a policy deploy fails because of that, delete an old unused version.
+- **No condition on `iot:ConnectAttributes` in the device policy.** AWS IoT re-checks an open connection now and then, and such a condition made those checks fail: from 2026-11-02 to 2026-11-13 every controller was disconnected (`AUTH_ERROR`) every few minutes. A test keeps it out.
 - **A policy may have at most 2,048 characters**, not counting whitespace. The device policy is close to it, so a deploy that adds to it fails and rolls back; a test checks the size of every policy.
 
 ## Setting up from nothing

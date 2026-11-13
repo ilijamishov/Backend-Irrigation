@@ -410,11 +410,11 @@ export class ControllersStack extends Stack {
           Effect: 'Allow',
           Action: 'iot:Connect',
           Resource: this.iotArn(`client/${THING}`),
-          Condition: {
-            Bool: { 'iot:Connection.Thing.IsAttached': 'true' },
-            // The controller registers a Last Will; AWS IoT checks it here.
-            'ForAllValues:StringEquals': { 'iot:ConnectAttributes': ['LastWill'] },
-          },
+          // No condition on iot:ConnectAttributes: AWS IoT re-checks an open
+          // connection now and then, and such a condition made those checks
+          // fail, closing every controller's connection every few minutes
+          // (AUTH_ERROR, confirmed on 2026-11-13).
+          Condition: { Bool: { 'iot:Connection.Thing.IsAttached': 'true' } },
         },
         {
           Effect: 'Allow',
