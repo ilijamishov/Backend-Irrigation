@@ -120,7 +120,7 @@ Outputs: `FirmwareBucketName`, `JobsDownloadRoleArn`, and `ReleaseRoleArn`, whic
 | `firmwareRepositoryId` | GitHub's numeric ID of the firmware repository (same owner) |
 | `provisioningRoleArn` | The existing role that lets AWS IoT register controllers |
 | `iotDataEndpoint` | This account's AWS IoT data endpoint (`aws iot describe-endpoint --endpoint-type iot:Data-ATS`) |
-| `googleWebClientId` | The **web** OAuth client ID from Google Cloud (`….apps.googleusercontent.com`). Synthesis fails while it's the placeholder. Several IDs can be given, separated by commas. |
+| `googleWebClientId` | The Google Cloud OAuth client IDs (`….apps.googleusercontent.com`) a Google ID token may be issued for, separated by commas: the **web** client (the app's `serverClientId`; Android tokens are issued for it) and the **iOS** client (iOS tokens are issued for it). Synthesis fails while it's the placeholder. |
 
 ## Development
 
