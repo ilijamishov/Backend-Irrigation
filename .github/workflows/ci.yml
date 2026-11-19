@@ -37,16 +37,18 @@ jobs:
         run: npx cdk synth --quiet
 
   deploy:
-    name: Deploy to AWS
+    name: Deploy to dev
     needs: test
     # Only pushes to main deploy; the IAM role also trusts nothing else.
+    # This deploys every stack of the dev stage (us-east-2). Prod is deployed
+    # by hand, after a change has run in dev (docs/DEPLOYMENT.md).
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     # No `environment:` here: it would change the OIDC subject to
     # `environment:<name>`, which the deploy role doesn't trust.
     concurrency:
-      group: deploy-production
+      group: deploy-dev
       cancel-in-progress: false
     permissions:
       contents: read
@@ -69,7 +71,7 @@ jobs:
         uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         with:
           role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
-          aws-region: us-east-1
+          aws-region: us-east-2
           role-session-name: backend-irrigation-${{ github.run_id }}
 
       - name: Deploy

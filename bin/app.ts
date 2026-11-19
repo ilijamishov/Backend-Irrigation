@@ -3,11 +3,9 @@ import * as path from 'node:path';
 
 import { App } from 'aws-cdk-lib';
 
-import { AuthStack } from '../lib/auth-stack';
 import { BackendVersion, ProcessGit } from '../lib/backend-version';
-import { CONTROLLER_GROUP_NAME, ControllersStack } from '../lib/controllers-stack';
-import { FirmwareStack } from '../lib/firmware-stack';
-import { GithubDeployStack } from '../lib/github-deploy-stack';
+import { IrrigationStacks } from '../lib/irrigation-stacks';
+import { Stage } from '../lib/stage';
 
 const app = new App();
 
@@ -22,47 +20,25 @@ function context(key: string): string {
   return value.trim();
 }
 
-const env = {
-  account: process.env.CDK_DEFAULT_ACCOUNT,
-  region: context('region'),
-};
+// `-c stage=dev` for the development copy; prod when left out.
+const readContext = (key: string): unknown => app.node.tryGetContext(key);
+const stage = Stage.fromContext(readContext);
 
-const auth = new AuthStack(app, 'Irrigation-Auth', {
-  env,
-  description: 'Cognito user pool with native Google sign-in for the irrigation app',
+IrrigationStacks.addTo(app, stage, {
   googleClientIds: context('googleWebClientId').split(',').map((id) => id.trim()),
-});
-
-new ControllersStack(app, 'Irrigation-Controllers', {
-  env,
-  description: 'What every irrigation controller shares in AWS IoT',
   provisioningRoleArn: context('provisioningRoleArn'),
-  iotDataEndpoint: context('iotDataEndpoint'),
-  userPool: auth.userPool,
-  appClient: auth.appClient,
-  // Only for the one-time `cdk import`, see the README.
-  importPhase: app.node.tryGetContext('controllersImportPhase') === 'true',
-  backendVersion: new BackendVersion(new ProcessGit(path.join(__dirname, '..'))).describe(),
-});
-
-new GithubDeployStack(app, 'Irrigation-GithubDeploy', {
-  env,
-  description: 'Lets GitHub Actions deploy this repository from main',
-  repository: context('githubRepository'),
-  ownerId: context('githubOwnerId'),
-  repositoryId: context('githubRepositoryId'),
-  branch: 'main',
-});
-
-new FirmwareStack(app, 'Irrigation-Firmware', {
-  env,
-  description: 'Firmware updates for every irrigation controller through AWS IoT Jobs',
+  backendRepository: {
+    repository: context('githubRepository'),
+    ownerId: context('githubOwnerId'),
+    repositoryId: context('githubRepositoryId'),
+  },
   firmwareRepository: {
     repository: context('firmwareRepository'),
     ownerId: context('githubOwnerId'),
     repositoryId: context('firmwareRepositoryId'),
   },
-  // By name, not a reference: a cross-stack export would tie the stacks'
-  // deploy order. The Controllers stack creates the group.
-  controllerGroupName: CONTROLLER_GROUP_NAME,
+  deployRegions: Stage.regionsOf(readContext),
+  backendVersion: new BackendVersion(new ProcessGit(path.join(__dirname, '..'))).describe(),
+  // Only for the one-time `cdk import`, see the README.
+  controllersImportPhase: app.node.tryGetContext('controllersImportPhase') === 'true',
 });

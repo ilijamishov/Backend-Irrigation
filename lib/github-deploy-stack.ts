@@ -16,6 +16,11 @@ export interface GithubDeployStackProps extends StackProps, GithubRepository {
   readonly branch: string;
   /** The CDK bootstrap qualifier (the default is `hnb659fds`). */
   readonly bootstrapQualifier?: string;
+  /**
+   * Other regions the workflow deploys to, such as the dev stage's. The role
+   * and the OIDC provider are account-wide, so one stack serves every stage.
+   */
+  readonly otherRegions?: string[];
 }
 
 /**
@@ -52,15 +57,15 @@ export class GithubDeployStack extends Stack {
       }),
     });
 
+    const regions = [this.region, ...(props.otherRegions ?? []).filter((r) => r !== this.region)];
     this.role.addToPolicy(
       new iam.PolicyStatement({
         actions: ['sts:AssumeRole'],
-        resources: [
-          `arn:aws:iam::${this.account}:role/cdk-${qualifier}-deploy-role-${this.account}-${this.region}`,
-          `arn:aws:iam::${this.account}:role/cdk-${qualifier}-file-publishing-role-${this.account}-${this.region}`,
-          `arn:aws:iam::${this.account}:role/cdk-${qualifier}-image-publishing-role-${this.account}-${this.region}`,
-          `arn:aws:iam::${this.account}:role/cdk-${qualifier}-lookup-role-${this.account}-${this.region}`,
-        ],
+        resources: regions.flatMap((region) =>
+          ['deploy', 'file-publishing', 'image-publishing', 'lookup'].map(
+            (kind) => `arn:aws:iam::${this.account}:role/cdk-${qualifier}-${kind}-role-${this.account}-${region}`,
+          ),
+        ),
       }),
     );
 

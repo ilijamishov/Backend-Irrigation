@@ -13,14 +13,20 @@ import {
 export const FIRMWARE_PREFIX = 'firmware/';
 /** Every firmware job starts with this, so the release role can't touch others. */
 export const FIRMWARE_JOB_PREFIX = 'firmware-';
-/** Only tags like `v1.2.0` release firmware. */
+/** Only tags like `v1.2.0` release firmware to prod's controllers. */
 export const RELEASE_TAG_PATTERN = 'refs/tags/v*';
+/** The release role's name in prod. IAM names are account-wide. */
+export const RELEASE_ROLE_NAME = 'irrigation-firmware-release';
 
 export interface FirmwareStackProps extends StackProps {
   /** The firmware repository; only its version tags may release. */
   readonly firmwareRepository: GithubRepository;
   /** The thing group every controller is in (the Controllers stack's). */
   readonly controllerGroupName: string;
+  /** The release role's name; prod's by default. Each stage needs its own. */
+  readonly releaseRoleName?: string;
+  /** Which tags may release, such as `refs/tags/v*` (the default). */
+  readonly releaseTagPattern?: string;
 }
 
 /**
@@ -87,13 +93,13 @@ export class FirmwareStack extends Stack {
   ): iam.Role {
     const repository = props.firmwareRepository;
     const role = new iam.Role(this, 'ReleaseRole', {
-      roleName: 'irrigation-firmware-release',
+      roleName: props.releaseRoleName ?? RELEASE_ROLE_NAME,
       description: `GitHub Actions releases firmware from ${repository.repository} (version tags)`,
       maxSessionDuration: Duration.hours(1),
       assumedBy: new iam.WebIdentityPrincipal(githubOidcProviderArn(this.account), {
         StringEquals: { 'token.actions.githubusercontent.com:aud': 'sts.amazonaws.com' },
         StringLike: {
-          'token.actions.githubusercontent.com:sub': `${githubRepositorySubject(repository)}:ref:${RELEASE_TAG_PATTERN}`,
+          'token.actions.githubusercontent.com:sub': `${githubRepositorySubject(repository)}:ref:${props.releaseTagPattern ?? RELEASE_TAG_PATTERN}`,
         },
       }),
     });

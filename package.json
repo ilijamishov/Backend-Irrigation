@@ -8,7 +8,7 @@
     "build": "tsc --noEmit",
     "test": "jest",
     "synth": "cdk synth",
-    "deploy:ci": "cdk deploy Irrigation-Auth --require-approval never"
+    "deploy:ci": "cdk deploy --all -c stage=dev --require-approval never"
   },
   "dependencies": {
     "@aws-sdk/client-cognito-identity-provider": "^3.1161.0",

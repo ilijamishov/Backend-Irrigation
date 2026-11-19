@@ -5,13 +5,29 @@
     "exclude": ["node_modules", "cdk.out", "test"]
   },
   "context": {
-    "region": "us-east-1",
+    "stages": {
+      "prod": {
+        "region": "us-east-1",
+        "iotDataEndpoint": "a2aio41tc62dt4-ats.iot.us-east-1.amazonaws.com",
+        "stackPrefix": "Irrigation",
+        "githubDeployStack": true,
+        "firmwareReleaseRoleName": "irrigation-firmware-release",
+        "firmwareReleaseTag": "v*"
+      },
+      "dev": {
+        "region": "us-east-2",
+        "iotDataEndpoint": "a2aio41tc62dt4-ats.iot.us-east-2.amazonaws.com",
+        "stackPrefix": "Irrigation-Dev",
+        "githubDeployStack": false,
+        "firmwareReleaseRoleName": "irrigation-dev-firmware-release",
+        "firmwareReleaseTag": "dev-v*"
+      }
+    },
     "githubRepository": "ilijamishov/Backend-Irrigation",
     "githubOwnerId": "17722294",
     "githubRepositoryId": "1444921207",
     "firmwareRepository": "ilijamishov/ESP32-Irrigation",
     "firmwareRepositoryId": "1410996714",
-    "iotDataEndpoint": "a2aio41tc62dt4-ats.iot.us-east-1.amazonaws.com",
     "provisioningRoleArn": "arn:aws:iam::289865615258:role/service-role/ESP32IrrigationProvisioningRole",
     "googleWebClientId": "1041808462118-ca08cr264jcu3ggr9ld5rks1jjnp84ja.apps.googleusercontent.com,1041808462118-ph936uottffqedpu9tnlfvs3t1ghsphu.apps.googleusercontent.com",
     "@aws-cdk/core:defaultCrossStackReferences": "strong"

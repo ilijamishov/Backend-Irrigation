@@ -2,16 +2,33 @@
 
 The AWS backend of the irrigation system, as [AWS CDK](https://docs.aws.amazon.com/cdk/) stacks in TypeScript. The app is [Mobile-Irrigation](https://github.com/ilijamishov/Mobile-Irrigation); the controller firmware is [ESP32-Irrigation](https://github.com/ilijamishov/ESP32-Irrigation).
 
-Region: `us-east-1`, the same as the controllers' AWS IoT endpoint.
+## Stages
+
+The backend runs twice in one AWS account, each copy in its own region:
+
+| Stage | Region | Stacks | Used by |
+|---|---|---|---|
+| `prod` | `us-east-1` | `Irrigation-Auth`, `Irrigation-Controllers`, `Irrigation-GithubDeploy`, `Irrigation-Firmware` | Controllers with release firmware, and store builds of the app |
+| `dev` | `us-east-2` | `Irrigation-Dev-Auth`, `Irrigation-Dev-Controllers`, `Irrigation-Dev-Firmware` | Development: controllers built with the dev settings, and development builds of the app |
+
+Each region has its own AWS IoT endpoint, Things, policies and limits, so nothing in dev can reach prod. A controller connects to one stage, chosen when its firmware is built. Every CDK command takes the stage as `-c stage=dev`; without it, the command is for prod, as before.
+
+Resources keep the same names in both stages, since they are per region. Only IAM is the same in every region:
+
+- **GitHub's OIDC provider** can exist once per account, so only prod has `Irrigation-GithubDeploy`. Its deploy role serves both stages: it may use the CDK bootstrap roles of every stage's region.
+- **The firmware release role** has a fixed name, so each stage names its own (`firmwareReleaseRoleName`): `irrigation-firmware-release` in prod, `irrigation-dev-firmware-release` in dev. Each trusts its own tags of the firmware repository (`firmwareReleaseTag`): `v*` releases to prod's controllers, `dev-v*` to dev's.
+- **The provisioning role** was made by hand and isn't tied to a region, so both stages share it.
+
+**A push to `main` deploys dev, never prod.** Prod is deployed by hand, after a change has run in dev ([docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)).
 
 ## Stacks
 
 | Stack | What it is | Deployed by |
 |---|---|---|
-| `Irrigation-Auth` | Cognito user pool the app signs in to, with native Google sign-in | GitHub Actions, on every push to `main` |
-| `Irrigation-Controllers` | What every controller shares in AWS IoT (its policies, the Fleet Provisioning template and the registration hook), who may reach which controller, and the API for it | You, from your computer |
-| `Irrigation-GithubDeploy` | Lets GitHub Actions deploy without stored AWS keys (OIDC) | You, once, from your computer |
-| `Irrigation-Firmware` | Firmware updates for every controller through AWS IoT Jobs: the bucket for firmware images and the roles to release and download them | You, from your computer |
+| `Irrigation-Auth` | Cognito user pool the app signs in to, with native Google sign-in | You, from your computer (in dev: GitHub Actions) |
+| `Irrigation-Controllers` | What every controller shares in AWS IoT (its policies, the Fleet Provisioning template and the registration hook), who may reach which controller, and the API for it | You, from your computer (in dev: GitHub Actions) |
+| `Irrigation-GithubDeploy` | Lets GitHub Actions deploy without stored AWS keys (OIDC), to both stages. Prod only | You, once, from your computer |
+| `Irrigation-Firmware` | Firmware updates for every controller through AWS IoT Jobs: the bucket for firmware images and the roles to release and download them | You, from your computer (in dev: GitHub Actions) |
 
 ### Irrigation-Auth: native Google sign-in
 
@@ -113,13 +130,13 @@ Outputs: `FirmwareBucketName`, `JobsDownloadRoleArn`, and `ReleaseRoleArn`, whic
 
 | Key | Value |
 |---|---|
-| `region` | `us-east-1` |
+| `stages` | One entry per stage: its `region`, its `iotDataEndpoint` (`aws iot describe-endpoint --endpoint-type iot:Data-ATS --region <region>`), its `stackPrefix` (`Irrigation`, `Irrigation-Dev`), `githubDeployStack` (whether it has `GithubDeploy`; only one stage may), and its firmware release role's name and tag pattern (`firmwareReleaseRoleName`, `firmwareReleaseTag`) |
+| `stage` | Not in the file: `-c stage=dev` on the command line. `prod` when left out |
 | `githubRepository` | `ilijamishov/Backend-Irrigation` |
 | `githubOwnerId`, `githubRepositoryId` | GitHub's numeric IDs of the owner and the repository, for the OIDC subject |
 | `firmwareRepository` | `ilijamishov/ESP32-Irrigation`, whose version tags release firmware |
 | `firmwareRepositoryId` | GitHub's numeric ID of the firmware repository (same owner) |
-| `provisioningRoleArn` | The existing role that lets AWS IoT register controllers |
-| `iotDataEndpoint` | This account's AWS IoT data endpoint (`aws iot describe-endpoint --endpoint-type iot:Data-ATS`) |
+| `provisioningRoleArn` | The existing role that lets AWS IoT register controllers, shared by both stages |
 | `googleWebClientId` | The Google Cloud OAuth client IDs (`….apps.googleusercontent.com`) a Google ID token may be issued for, separated by commas: the **web** client (the app's `serverClientId`; Android tokens are issued for it) and the **iOS** client (iOS tokens are issued for it). Synthesis fails while it's the placeholder. |
 
 ## Development
@@ -128,7 +145,8 @@ Outputs: `FirmwareBucketName`, `JobsDownloadRoleArn`, and `ReleaseRoleArn`, whic
 npm ci
 npm run build    # type-check
 npm test         # unit tests of the Lambdas and the stacks
-npx cdk synth    # build the CloudFormation templates into cdk.out/
+npx cdk synth    # build the CloudFormation templates into cdk.out/ (prod)
+npx cdk synth -c stage=dev    # the same for dev
 ```
 
 The Lambdas are in `lambda/`, bundled by esbuild (`NodejsFunction`) for Node.js 24 on ARM. One-off scripts are in `scripts/`.
@@ -149,7 +167,7 @@ Done once, from your computer:
    ```
    Note the output `DeployRoleArn`.
 5. **In GitHub**, open the repository's Settings → Secrets and variables → Actions → **Variables**, and add `AWS_DEPLOY_ROLE_ARN` with that ARN.
-6. **Push to `main`.** GitHub Actions tests and deploys `Irrigation-Auth`. Its outputs are in the workflow log and in the CloudFormation console.
+6. **Push to `main`.** GitHub Actions tests and deploys the dev stage. Its outputs are in the workflow log and in the CloudFormation console.
 
 If the account already has a GitHub OIDC provider, step 4 fails with "already exists". Then the stack has to import the existing provider instead.
 
@@ -175,6 +193,6 @@ Step-by-step instructions are in [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
 `.github/workflows/ci.yml`:
 
 - **Every push and pull request:** install, type-check, test, synthesize.
-- **Push to `main`, after the tests pass:** deploy `Irrigation-Auth` (`npm run deploy:ci`). One deploy runs at a time.
+- **Push to `main`, after the tests pass:** deploy every stack of the **dev** stage in `us-east-2` (`npm run deploy:ci`, which is `cdk deploy --all -c stage=dev`). One deploy runs at a time. A test checks that it can't reach prod.
 
-`Irrigation-GithubDeploy` is never deployed by the workflow; change it by hand (step 4). `Irrigation-Controllers` isn't deployed by the workflow yet either: a deploy before the import above would fail, because the resources already exist.
+Prod is never deployed by the workflow: deploy it by hand once the change works in dev. `Irrigation-GithubDeploy` is changed by hand too (step 4).

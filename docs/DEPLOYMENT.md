@@ -2,18 +2,30 @@
 
 How to get a change to this repo live in AWS. Why each stack exists is in the [README](../README.md).
 
-There is one environment: one AWS account, in `us-east-1`. Development and real use share it, so a deploy affects every controller and user straight away.
+There are two stages in one AWS account (README, "Stages"): **prod** in `us-east-1`, which controllers in use and store builds of the app rely on, and **dev** in `us-east-2`, for development. A deploy to prod affects every controller and user straight away, so try a change in dev first. Every command below is for prod; add `-c stage=dev` and use the `Irrigation-Dev-` stack names for dev.
 
 ## What deploys how
 
 | Stack | What it holds | How it deploys |
 |---|---|---|
-| `Irrigation-Auth` | Sign-in (Cognito) | Automatically, by GitHub Actions, on every push to `main` that passes the tests |
-| `Irrigation-Controllers` | The API, the AWS IoT policies and template, the app authorizer, the table `irrigation-access` | **By hand**, from your computer |
-| `Irrigation-GithubDeploy` | What lets GitHub Actions deploy | By hand, and rarely |
-| `Irrigation-Firmware` | The firmware bucket, and the roles that release firmware and sign its download links | By hand, and rarely |
+| Stage | Stacks | How they deploy |
+|---|---|---|
+| dev | `Irrigation-Dev-Auth`, `Irrigation-Dev-Controllers`, `Irrigation-Dev-Firmware` | **Automatically**, by GitHub Actions, on every push to `main` that passes the tests |
+| prod | `Irrigation-Auth`, `Irrigation-Controllers` | **By hand**, from your computer, once the change works in dev |
+| prod | `Irrigation-GithubDeploy`, `Irrigation-Firmware` | By hand, and rarely |
 
-**Pushing to `main` doesn't deploy `Irrigation-Controllers`.** A change to the API or to AWS IoT isn't live until you run the deploy below.
+**A push to `main` deploys dev only.** Nothing reaches prod until you run the deploy below. `Irrigation-GithubDeploy` holds the role the workflow deploys dev with.
+
+## Deploy to dev
+
+A push to `main` does it. To deploy dev from your computer instead, for example before pushing:
+
+```powershell
+npx.cmd cdk diff --all -c stage=dev --profile irrigation
+npx.cmd cdk deploy --all -c stage=dev --profile irrigation
+```
+
+Then check the change with a development build of the app and a dev controller.
 
 ## Before you start
 
@@ -45,13 +57,13 @@ The commands use PowerShell, where `npx` must be written `npx.cmd`.
    ```powershell
    npx.cmd cdk deploy Irrigation-Controllers --profile irrigation
    ```
-   It asks for confirmation if permissions change. It also deploys `Irrigation-Auth` when needed, because the API uses its user pool.
+   It asks for confirmation if permissions change. It also deploys `Irrigation-Auth` when needed, because the API uses its user pool. A change to sign-in only: `npx.cmd cdk deploy Irrigation-Auth --profile irrigation`.
 4. **Check it worked:** open the app, and confirm your controller loads and whatever you changed works. Errors are in the CloudWatch log groups of the stack's Lambdas, whose names start with `Irrigation-Controllers-`.
 5. **Push to `main`,** if you haven't yet, so the repo matches what is live. Then check the workflow in GitHub Actions passes.
 
 ## Values the app needs
 
-The app reads these outputs at build time ([its deployment guide](https://github.com/ilijamishov/Mobile-Irrigation/blob/main/docs/DEPLOYMENT.md)). They only change if a stack is recreated, and they are shown after each deploy and in the CloudFormation console.
+The app reads these outputs at build time, from prod's stacks for `config/production.json` and from dev's (`Irrigation-Dev-…`) for `config/development.json` ([its deployment guide](https://github.com/ilijamishov/Mobile-Irrigation/blob/main/docs/DEPLOYMENT.md)). They only change if a stack is recreated, and they are shown after each deploy and in the CloudFormation console.
 
 | Stack output | App setting |
 |---|---|
@@ -109,7 +121,25 @@ The [README](../README.md#first-time-setup) has the first-time steps: bootstrapp
 
 `Irrigation-Controllers` was set up by importing AWS IoT resources that already existed, which is also described there. **Creating everything in a new account has never been tried.** It needs at least the provisioning role and the AWS IoT endpoint in `cdk.json`, and the steps may need adjusting.
 
+## Setting up dev (once)
+
+Dev is created from nothing, unlike prod, whose AWS IoT resources were imported. In PowerShell:
+
+1. **Raise the Lambda limit in `us-east-2`.** A region AWS hasn't used in the account allows only 10 concurrent Lambda executions, and the IoT authorizer reserves 50, so the deploy would fail. In the console: Service Quotas → `us-east-2` → AWS Lambda → **Concurrent executions** → request 1000. Check it with `aws lambda get-account-settings --region us-east-2 --profile irrigation`.
+2. **Bootstrap CDK** in the region:
+   ```powershell
+   npx.cmd cdk bootstrap aws://289865615258/us-east-2 --profile irrigation
+   ```
+3. **Let the workflow deploy to `us-east-2`:** deploy prod's `Irrigation-GithubDeploy` again. Its role gets the bootstrap roles of `us-east-2` as well; the diff shows only those four.
+   ```powershell
+   npx.cmd cdk diff Irrigation-GithubDeploy --profile irrigation
+   npx.cmd cdk deploy Irrigation-GithubDeploy --profile irrigation
+   ```
+4. **Deploy dev** from your computer the first time, as in [Deploy to dev](#deploy-to-dev). The user pool, table, policies, Fleet Provisioning template, thing group, authorizer, firmware bucket and the role `irrigation-dev-firmware-release` are created new. From then on a push to `main` deploys it.
+5. **A claim certificate for dev controllers:** in the AWS IoT console in `us-east-2`, Security → Certificates → Create, download the certificate and key, activate it, and attach the policy `ESP32IrrigationClaimProvisioningPolicy`. It belongs in the firmware repo's `certs/dev/` (its DEPLOYMENT.md, "A dev controller"). Never commit or share the key.
+6. **The app's settings:** copy the outputs of the dev stacks into the app's `config/development.json` ([Values the app needs](#values-the-app-needs)).
+7. **Firmware releases to dev:** in the firmware repository on GitHub, Settings → Secrets and variables → Actions, add the outputs of `Irrigation-Dev-Firmware` as the **variables** `AWS_RELEASE_ROLE_ARN_DEV` (`ReleaseRoleArn`), `FIRMWARE_BUCKET_DEV` (`FirmwareBucketName`) and `JOBS_DOWNLOAD_ROLE_ARN_DEV` (`JobsDownloadRoleArn`), and dev's claim certificate and key as the **secrets** `CLAIM_CERTIFICATE_DEV` and `CLAIM_PRIVATE_KEY_DEV`. Then a `dev-v*` tag releases to dev's controllers (the firmware repo's DEPLOYMENT.md).
+
 ## Before a public release
 
-- Consider a separate environment, because today a mistake reaches every user at once.
 - Consider having the workflow deploy `Irrigation-Controllers` as well.
