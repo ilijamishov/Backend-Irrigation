@@ -12,7 +12,8 @@
         "stackPrefix": "Irrigation",
         "githubDeployStack": true,
         "firmwareReleaseRoleName": "irrigation-firmware-release",
-        "firmwareReleaseTag": "v*"
+        "firmwareReleaseTag": "v*",
+        "minimumAppVersion": "1.0.0"
       },
       "dev": {
         "region": "us-east-2",
@@ -20,7 +21,8 @@
         "stackPrefix": "Irrigation-Dev",
         "githubDeployStack": false,
         "firmwareReleaseRoleName": "irrigation-dev-firmware-release",
-        "firmwareReleaseTag": "dev-v*"
+        "firmwareReleaseTag": "dev-v*",
+        "minimumAppVersion": "1.0.0"
       }
     },
     "githubRepository": "ilijamishov/Backend-Irrigation",

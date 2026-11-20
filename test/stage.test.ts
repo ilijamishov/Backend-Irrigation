@@ -8,6 +8,7 @@ const stages = {
     githubDeployStack: true,
     firmwareReleaseRoleName: 'irrigation-firmware-release',
     firmwareReleaseTag: 'v*',
+    minimumAppVersion: '1.0.0',
   },
   dev: {
     region: 'us-east-2',
@@ -16,6 +17,7 @@ const stages = {
     githubDeployStack: false,
     firmwareReleaseRoleName: 'irrigation-dev-firmware-release',
     firmwareReleaseTag: 'dev-v*',
+    minimumAppVersion: '1.2.0',
   },
 };
 
@@ -44,6 +46,7 @@ describe('Stage', () => {
     expect(stage.hasGithubDeployStack).toBe(false);
     expect(stage.firmwareReleaseRoleName).toBe('irrigation-dev-firmware-release');
     expect(stage.firmwareReleaseRef).toBe('refs/tags/dev-v*');
+    expect(stage.minimumAppVersion).toBe('1.2.0');
   });
 
   it("keeps prod's stack names and prefixes dev's", () => {
@@ -96,5 +99,20 @@ describe('Stage', () => {
         }),
       ),
     ).toThrow('Stage "dev" needs "githubDeployStack" (true or false)');
+  });
+
+  it('needs the minimum app version as MAJOR.MINOR.PATCH', () => {
+    const withMinimum = (minimumAppVersion: unknown) =>
+      contextWith({ stage: 'dev', stages: { ...stages, dev: { ...stages.dev, minimumAppVersion } } });
+
+    expect(() => Stage.fromContext(withMinimum(undefined))).toThrow(
+      'Stage "dev" needs "minimumAppVersion"',
+    );
+    for (const bad of ['1.0', '1.0.0+1', 'v1.0.0']) {
+      expect(() => Stage.fromContext(withMinimum(bad))).toThrow(
+        'Stage "dev" needs "minimumAppVersion" as MAJOR.MINOR.PATCH',
+      );
+    }
+    expect(Stage.fromContext(withMinimum('0.0.0')).minimumAppVersion).toBe('0.0.0');
   });
 });

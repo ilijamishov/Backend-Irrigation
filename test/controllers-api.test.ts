@@ -9,6 +9,7 @@ import type {
   UserController,
 } from '../lambda/controllers/access-store';
 import { ControllersApi } from '../lambda/controllers/api';
+import { AppVersionGate } from '../lambda/controllers/app-version';
 import type { ClaimOutcome } from '../lambda/controllers/claim-service';
 import type { AccountDeletion, Release, Transfer } from '../lambda/controllers/ownership-service';
 import type {
@@ -94,6 +95,7 @@ function event(
     username?: unknown;
     body?: string;
     isBase64Encoded?: boolean;
+    headers?: Record<string, string>;
   } = {},
 ): APIGatewayProxyEventV2WithJWTAuthorizer {
   const sub = 'sub' in overrides ? overrides.sub : 'alice';
@@ -106,6 +108,7 @@ function event(
       ...(overrides.userId ? { userId: overrides.userId } : {}),
     },
     body: overrides.body,
+    headers: overrides.headers ?? {},
     isBase64Encoded: overrides.isBase64Encoded ?? false,
     requestContext: {
       authorizer: {
@@ -152,7 +155,10 @@ const zoneAnswer = {
   enabled: true,
 };
 
-function setUp(outcome: ClaimOutcome = { result: 'pending' }) {
+function setUp(
+  outcome: ClaimOutcome = { result: 'pending' },
+  minimumAppVersion = '0.0.0',
+) {
   const store = new FakeStore();
   const claim = jest.fn(async () => outcome);
   const timeZoneAt = jest.fn(async (_latitude: number, _longitude: number) => ({
@@ -235,6 +241,7 @@ function setUp(outcome: ClaimOutcome = { result: 'pending' }) {
       sharing,
       ownership,
       '7bf65f8',
+      AppVersionGate.of(minimumAppVersion),
     ),
   };
 }
@@ -275,6 +282,62 @@ describe('ControllersApi', () => {
       await api.handle(event(CLAIM, { sub: 'alice', body: JSON.stringify({ code: CODE, userId: 'bob' }) }));
 
       expect(claim).toHaveBeenCalledWith('alice', DEVICE_ID, Buffer.alloc(32, 7));
+    });
+  });
+
+  describe('the app version', () => {
+    const appVersion = (version: string) => ({ headers: { 'x-irrigation-app-version': version } });
+
+    it('tells an app older than the minimum to update, before doing anything', async () => {
+      const { api, store, claim } = setUp(undefined, '1.2.0');
+
+      const listed = await api.handle(event('GET /controllers', appVersion('1.1.9')));
+      const claimed = await api.handle(
+        event(CLAIM, { ...appVersion('1.1.9'), body: JSON.stringify({ code: CODE }) }),
+      );
+
+      for (const response of [listed, claimed]) {
+        expect(response.statusCode).toBe(426);
+        expect(parsed(response)).toEqual({
+          error: 'app_update_required',
+          minimumVersion: '1.2.0',
+        });
+      }
+      expect(claim).not.toHaveBeenCalled();
+      expect(store.renames).toEqual([]);
+    });
+
+    it('tells an app that names no version to update once a minimum is set', async () => {
+      const { api } = setUp(undefined, '1.0.0');
+
+      const response = await api.handle(event('GET /version'));
+
+      expect(response.statusCode).toBe(426);
+    });
+
+    it('serves the minimum version and newer', async () => {
+      const { api } = setUp(undefined, '1.2.0');
+
+      for (const version of ['1.2.0', '1.3.0']) {
+        const response = await api.handle(event('GET /version', appVersion(version)));
+        expect(response.statusCode).toBe(200);
+      }
+    });
+
+    it('serves every app while the minimum is 0.0.0', async () => {
+      const { api } = setUp();
+
+      const response = await api.handle(event('GET /version'));
+
+      expect(response.statusCode).toBe(200);
+    });
+
+    it('still answers 401 first for a call without a user', async () => {
+      const { api } = setUp(undefined, '1.2.0');
+
+      const response = await api.handle(event('GET /version', { sub: undefined }));
+
+      expect(response.statusCode).toBe(401);
     });
   });
 

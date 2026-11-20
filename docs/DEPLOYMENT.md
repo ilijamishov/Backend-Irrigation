@@ -85,6 +85,14 @@ Other settings are in `cdk.json`. The time zone table only needs regenerating wh
 - **A new API route or field:** deploy the backend first, then release the app.
 - **A change to a topic in the MQTT contract:** add it to the device policy and deploy **before** flashing firmware that uses it. AWS IoT closes the controller's connection on a topic the policy doesn't allow. The same goes for the AWS IoT Jobs topics that firmware updates use.
 
+## Raising the minimum app version
+
+Raise `minimumAppVersion` of a stage in `cdk.json` when a backend or firmware change would break older apps, in the same change. Those apps then show "Update the app" instead of failing. The rules for when it's needed, and the table of versions that work together, are in the app repo's [docs/compatibility.md](https://github.com/ilijamishov/Mobile-Irrigation/blob/main/docs/compatibility.md).
+
+- **Only once the new app is out:** in the stores for prod, installed on the test phones for dev. Otherwise nobody has an app that works.
+- **Dev** follows with the push to `main`; **prod** changes when `Irrigation-Controllers` is deployed by hand.
+- **Lowering it** again is a deploy too, and lets the older apps back in.
+
 ## Firmware updates, first time
 
 Done once, before the first firmware that updates itself is flashed:

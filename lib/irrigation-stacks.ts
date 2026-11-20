@@ -50,6 +50,7 @@ export class IrrigationStacks {
       appClient: auth.appClient,
       importPhase: settings.controllersImportPhase,
       backendVersion: settings.backendVersion,
+      minimumAppVersion: stage.minimumAppVersion,
     });
 
     if (stage.hasGithubDeployStack) {

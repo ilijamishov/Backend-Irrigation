@@ -64,6 +64,8 @@ The design is in the app repo's [docs/claiming.md](https://github.com/ilijamisho
 
 **The API** lets the app claim a controller, list a user's controllers, name them, save where they are, manage their zones, and share them with Managers. It needs a Cognito access token from the app client, and the user is always taken from that token.
 
+The app names its version in the header `x-irrigation-app-version` (`1.2.0`). An app older than the stage's `minimumAppVersion` gets **HTTP 426** with `{"error":"app_update_required","minimumVersion":"1.2.0"}` on every call, and asks the user to update. An app that names no version counts as the oldest, so it is refused once the minimum is above `0.0.0`. Compatibility between the app, the backend and the firmware is described in the app repo's [docs/compatibility.md](https://github.com/ilijamishov/Mobile-Irrigation/blob/main/docs/compatibility.md).
+
 | Call | Purpose |
 |---|---|
 | `GET /version` | The deployed backend's version, for the app's About screen: the short git commit the stacks were built from, with `-dirty` if the working tree had uncommitted changes, or `unknown` |
@@ -130,7 +132,7 @@ Outputs: `FirmwareBucketName`, `JobsDownloadRoleArn`, and `ReleaseRoleArn`, whic
 
 | Key | Value |
 |---|---|
-| `stages` | One entry per stage: its `region`, its `iotDataEndpoint` (`aws iot describe-endpoint --endpoint-type iot:Data-ATS --region <region>`), its `stackPrefix` (`Irrigation`, `Irrigation-Dev`), `githubDeployStack` (whether it has `GithubDeploy`; only one stage may), and its firmware release role's name and tag pattern (`firmwareReleaseRoleName`, `firmwareReleaseTag`) |
+| `stages` | One entry per stage: its `region`, its `iotDataEndpoint` (`aws iot describe-endpoint --endpoint-type iot:Data-ATS --region <region>`), its `stackPrefix` (`Irrigation`, `Irrigation-Dev`), `githubDeployStack` (whether it has `GithubDeploy`; only one stage may), its firmware release role's name and tag pattern (`firmwareReleaseRoleName`, `firmwareReleaseTag`), and `minimumAppVersion`, the oldest app version its API serves (`MAJOR.MINOR.PATCH`) |
 | `stage` | Not in the file: `-c stage=dev` on the command line. `prod` when left out |
 | `githubRepository` | `ilijamishov/Backend-Irrigation` |
 | `githubOwnerId`, `githubRepositoryId` | GitHub's numeric IDs of the owner and the repository, for the OIDC subject |

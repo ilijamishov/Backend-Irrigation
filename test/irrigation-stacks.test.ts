@@ -109,6 +109,22 @@ describe('IrrigationStacks', () => {
     expect(() => stacksOf(undefined, { controllersImportPhase: true })).not.toThrow();
   });
 
+  it("passes each stage's minimum app version to its API", () => {
+    for (const [stage, name] of [
+      [undefined, 'Irrigation-Controllers'],
+      ['dev', 'Irrigation-Dev-Controllers'],
+    ] as const) {
+      const stages = cdkJson.context.stages as Record<string, { minimumAppVersion: string }>;
+      templateOf(stacksOf(stage), name).hasResourceProperties('AWS::Lambda::Function', {
+        Environment: {
+          Variables: Match.objectLike({
+            MINIMUM_APP_VERSION: stages[stage ?? 'prod'].minimumAppVersion,
+          }),
+        },
+      });
+    }
+  });
+
   it('describes a different region and endpoint for each stage in cdk.json', () => {
     const stages = cdkJson.context.stages as Record<string, { region: string; iotDataEndpoint: string }>;
 

@@ -13,6 +13,7 @@ import {
   type ControllerZone,
   DynamoAccessStore,
 } from './access-store';
+import { APP_VERSION_HEADER, AppVersionGate } from './app-version';
 import { IotClaimReportSource } from './claim-report';
 import { type ClaimOutcome, ClaimService } from './claim-service';
 import { AccessRevoker, DynamoConnectionRegistry, IotConnectionCloser } from './connections';
@@ -68,12 +69,21 @@ export class ControllersApi {
     private readonly ownership: Pick<OwnershipService, 'transfer' | 'release' | 'deleteAccount'>,
     /** The deployed backend's version: the git commit it was built from. */
     private readonly backendVersion: string,
+    /** Refuses apps older than the stage's minimum app version. */
+    private readonly appVersions: AppVersionGate = AppVersionGate.of('0.0.0'),
   ) {}
 
   async handle(event: APIGatewayProxyEventV2WithJWTAuthorizer): Promise<Response> {
     const userId = event.requestContext.authorizer?.jwt?.claims?.sub;
     if (typeof userId !== 'string' || userId.length === 0) {
       return error(401, 'unauthorized');
+    }
+    // API Gateway's HTTP API passes header names in lower case.
+    if (!this.appVersions.allows(event.headers?.[APP_VERSION_HEADER])) {
+      return json(426, {
+        error: 'app_update_required',
+        minimumVersion: this.appVersions.minimum.toString(),
+      });
     }
 
     try {
@@ -611,6 +621,7 @@ function fromEnvironment(environment: NodeJS.ProcessEnv = process.env): Controll
     sharing,
     ownership,
     process.env.BACKEND_VERSION || 'unknown',
+    AppVersionGate.of(process.env.MINIMUM_APP_VERSION || '0.0.0'),
   );
 }
 

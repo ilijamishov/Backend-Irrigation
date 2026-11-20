@@ -36,6 +36,7 @@ function synth(importPhase: boolean): Template {
       provisioningRoleArn,
       importPhase,
       backendVersion: '7bf65f8',
+      minimumAppVersion: '1.2.0',
       iotDataEndpoint: 'example-ats.iot.us-east-1.amazonaws.com',
       userPool: auth.userPool,
       appClient: auth.appClient,
@@ -458,6 +459,7 @@ describe('ControllersStack', () => {
             IOT_DATA_ENDPOINT: 'example-ats.iot.us-east-1.amazonaws.com',
             USER_POOL_ID: Match.anyValue(),
             BACKEND_VERSION: '7bf65f8',
+            MINIMUM_APP_VERSION: '1.2.0',
           }),
         },
       });

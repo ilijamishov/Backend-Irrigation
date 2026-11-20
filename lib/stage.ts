@@ -26,6 +26,12 @@ export class Stage {
     readonly firmwareReleaseRoleName: string,
     /** Which firmware repository tags release to this stage, such as `v*`. */
     readonly firmwareReleaseTag: string,
+    /**
+     * The oldest app version the stage's API still serves (`MAJOR.MINOR.PATCH`).
+     * Raise it when a change would break older apps: they then ask the user to
+     * update instead.
+     */
+    readonly minimumAppVersion: string,
   ) {}
 
   /** Reads the stage named by the context `stage` from the context `stages`. */
@@ -54,6 +60,7 @@ export class Stage {
       flag(settings, name, 'githubDeployStack'),
       text(settings, name, 'firmwareReleaseRoleName'),
       text(settings, name, 'firmwareReleaseTag'),
+      version(settings, name, 'minimumAppVersion'),
     );
   }
 
@@ -90,6 +97,14 @@ function text(settings: Record<string, unknown>, stage: string, key: string): st
     throw new Error(`Stage "${stage}" needs "${key}" in cdk.json.`);
   }
   return value.trim();
+}
+
+function version(settings: Record<string, unknown>, stage: string, key: string): string {
+  const value = text(settings, stage, key);
+  if (!/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(value)) {
+    throw new Error(`Stage "${stage}" needs "${key}" as MAJOR.MINOR.PATCH in cdk.json.`);
+  }
+  return value;
 }
 
 function flag(settings: Record<string, unknown>, stage: string, key: string): boolean {

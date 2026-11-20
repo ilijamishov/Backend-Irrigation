@@ -57,6 +57,11 @@ export interface ControllersStackProps extends StackProps {
   readonly importPhase?: boolean;
   /** What `GET /version` answers: the commit the stacks were built from. */
   readonly backendVersion?: string;
+  /**
+   * The oldest app version the API still serves, such as `1.0.0`. Older apps,
+   * and apps that don't name their version, are told to update (HTTP 426).
+   */
+  readonly minimumAppVersion?: string;
 }
 
 /**
@@ -223,6 +228,7 @@ export class ControllersStack extends Stack {
         USER_POOL_ID: props.userPool.userPoolId,
         GEO_TZ_DATA_PATH: `/var/task/${TIME_ZONE_MAP_FOLDER}`,
         BACKEND_VERSION: props.backendVersion ?? 'unknown',
+        MINIMUM_APP_VERSION: props.minimumAppVersion ?? '0.0.0',
       },
       logGroup: new logs.LogGroup(this, 'ControllersApiLogs', {
         retention: logs.RetentionDays.ONE_MONTH,
